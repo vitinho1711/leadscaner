@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+leads.json
+campaign_templates.json
+.wwebjs_auth
+.wwebjs_cache
+.DS_Store
