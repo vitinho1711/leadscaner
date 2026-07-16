@@ -255,6 +255,7 @@ async function initUserWhatsApp(userId) {
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: AUTH_DIR }),
     puppeteer: { 
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: true, 
       args: [
         '--no-sandbox', 
@@ -906,6 +907,7 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
   try {
     console.log(`[User ${userId}] 🔍 Iniciando scraping: "${searchQuery}" (limite: ${maxLeads})`);
     browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: 'new',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-notifications', '--disable-geolocation', '--lang=pt-BR', '--disable-blink-features=AutomationControlled']
     });
