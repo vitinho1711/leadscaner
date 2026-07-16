@@ -41,6 +41,17 @@ let dbUsers = [];
 try { if (fs.existsSync(USERS_FILE)) dbUsers = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8')); } catch (e) { }
 function saveUsers() { try { fs.writeFileSync(USERS_FILE, JSON.stringify(dbUsers, null, 2), 'utf-8'); } catch (e) { } }
 
+if (dbUsers.length === 0) {
+  dbUsers.push({
+    id: "1",
+    username: "admin",
+    password: "$2b$10$7XdOQF6LU7yuKSuJuCgBDuA8ZDjPF3wgYj5WcVvlwRUpM2H2K7ew.", // 123456
+    role: "admin",
+    config: { groqApiKey: "", enableAutoResponder: true }
+  });
+  saveUsers();
+}
+
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 let dbHistory = [];
 try { if (fs.existsSync(HISTORY_FILE)) dbHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')); } catch (e) { }
