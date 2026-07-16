@@ -233,7 +233,7 @@ function getOpenAIInstance(userId) {
 }
 
 // WHATSAPP INIT POR USUÁRIO
-const AUTH_DIR = path.join(os.homedir(), '.sdr_wwebjs_auth');
+const AUTH_DIR = path.join(DATA_DIR, '.sdr_wwebjs_auth');
 
 async function cleanSessionSafely(userId) {
   const sessionDir = path.join(AUTH_DIR, `session-${userId}`);
