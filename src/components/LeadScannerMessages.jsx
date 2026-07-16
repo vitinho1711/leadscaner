@@ -21,6 +21,7 @@ export default function LeadScannerMessages() {
   const [batchCount, setBatchCount] = useState(16);
   const [batchSalesperson, setBatchSalesperson] = useState('');
   const [batchService, setBatchService] = useState('');
+  const [batchTone, setBatchTone] = useState('variado');
   const [isGeneratingBatch, setIsGeneratingBatch] = useState(false);
 
   useEffect(() => {
@@ -90,6 +91,27 @@ export default function LeadScannerMessages() {
     saveTemplatesToBackend(newTemplates);
   };
 
+  const handleDeleteMessage = (id) => {
+    if (window.confirm("Deseja mesmo excluir esta mensagem?")) {
+      const newTemplates = templates.filter(t => t.id !== id);
+      setTemplates(newTemplates);
+      if (activeTemplate?.id === id) {
+        setActiveTemplate(newTemplates.length > 0 ? newTemplates[0] : null);
+        setIsEditing(false);
+      }
+      saveTemplatesToBackend(newTemplates);
+    }
+  };
+
+  const handleClearAll = () => {
+    if (window.confirm("Tem certeza que deseja apagar TODAS as mensagens salvas? Esta ação não pode ser desfeita.")) {
+      setTemplates([]);
+      setActiveTemplate(null);
+      setIsEditing(false);
+      saveTemplatesToBackend([]);
+    }
+  };
+
   const handleAiGenerate = () => {
     const aiText = 'Olá {nome}! Percebi que a {empresa} é super conceituada na área de {nicho}. Estou entrando em contato porque nossa IA tem ajudado empresas como a sua a escalar as vendas pelo WhatsApp automaticamente.\n\nFaz sentido conversarmos por 5 minutos?';
     if (isEditing) {
@@ -130,7 +152,8 @@ export default function LeadScannerMessages() {
           niche: batchNiche,
           count: batchCount,
           salesperson: batchSalesperson,
-          service: batchService
+          service: batchService,
+          tone: batchTone
         })
       });
       const data = await res.json();
@@ -167,6 +190,15 @@ export default function LeadScannerMessages() {
         </div>
         
         <div className="flex items-center gap-3">
+          {templates.length > 0 && (
+            <button 
+              onClick={handleClearAll} 
+              className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-lg text-sm font-bold transition-all"
+              title="Apagar todas as mensagens"
+            >
+              <Trash2 size={16} /> Limpar Tudo
+            </button>
+          )}
           <button 
             onClick={() => { setShowBatchForm(!showBatchForm); setIsEditing(false); }} 
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 rounded-lg text-sm font-bold transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)]"
@@ -267,6 +299,25 @@ export default function LeadScannerMessages() {
                 />
               </div>
               <p className="text-[10px] text-gray-500 mt-1.5">Máximo: 50 variações por geração</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 relative z-10 mb-4">
+            <div>
+              <label className="text-xs text-emerald-300 font-bold mb-2 flex items-center gap-1.5" style={{ display: 'block' }}>
+                🎭 Tom / Estilo da Mensagem
+              </label>
+              <select 
+                value={batchTone} 
+                onChange={e => setBatchTone(e.target.value)} 
+                className="w-full bg-black/40 border border-emerald-500/20 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
+              >
+                <option value="variado">Variado (Recomendado - Mescla abordagens)</option>
+                <option value="agressivo">Agressivo (Direto ao ponto, focado na venda)</option>
+                <option value="curioso">Curioso (Gera curiosidade antes de oferecer)</option>
+                <option value="consultivo">Consultivo (Foco em ajudar e empatia)</option>
+                <option value="amigável">Amigável e Casual (Super informal)</option>
+              </select>
             </div>
           </div>
 
@@ -447,6 +498,9 @@ export default function LeadScannerMessages() {
                     <>
                       <button onClick={() => startEdit(activeTemplate)} className="flex items-center gap-2 px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-medium transition-colors border border-white/5">
                         <Edit2 size={12} /> Editar
+                      </button>
+                      <button onClick={() => handleDeleteMessage(activeTemplate.id)} className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-xs font-medium transition-colors border border-red-500/10">
+                        <Trash2 size={12} /> Excluir
                       </button>
                     </>
                   )}

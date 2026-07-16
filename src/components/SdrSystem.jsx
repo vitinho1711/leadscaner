@@ -16,7 +16,7 @@ import {
   Power, Rocket, RotateCcw, Pause, LayoutDashboard, PlusCircle, History, Mail, Settings, User, LogOut, Monitor, Gift
 } from 'lucide-react';
 
-export default function SdrSystem({ userRole, planInfo }) {
+export default function SdrSystem({ userRole, planInfo, handleLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [notifications, setNotifications] = useState([]);
   const [globalWaData, setGlobalWaData] = useState({ status: 'CONNECTING', qr: null });
@@ -34,8 +34,18 @@ export default function SdrSystem({ userRole, planInfo }) {
   useEffect(() => {
     const fetchWa = async () => {
       try {
-        const res = await fetch('/api/whatsapp/status');
-        if (res.ok) setGlobalWaData(await res.json());
+        const token = localStorage.getItem('sdr_jwt_token');
+        const res = await fetch('/api/whatsapp/status', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        if (res.ok) {
+          setGlobalWaData(await res.json());
+        } else if (res.status === 401) {
+          // If unauthorized, don't trigger the modal error state yet
+          setGlobalWaData({ status: 'CONNECTING', qr: null });
+        } else {
+          setGlobalWaData({ status: 'DISCONNECTED', qr: null });
+        }
       } catch(e) {
         setGlobalWaData({ status: 'DISCONNECTED', qr: null });
       }
@@ -166,7 +176,7 @@ export default function SdrSystem({ userRole, planInfo }) {
               <p className="text-xs text-gray-500 truncate">vitor@example.com</p>
             </div>
           </div>
-          <button className="mt-4 w-full flex items-center gap-2 text-xs font-bold text-red-400 hover:text-red-300 transition-colors">
+          <button onClick={handleLogout} className="mt-4 w-full flex items-center gap-2 text-xs font-bold text-red-400 hover:text-red-300 transition-colors">
             <LogOut size={14} /> Sair do sistema
           </button>
         </div>
@@ -193,7 +203,7 @@ export default function SdrSystem({ userRole, planInfo }) {
       </div>
 
       {/* GLOBAL WHATSAPP CONNECTION MODAL */}
-      {!dismissWa && globalWaData.status !== 'CONNECTED' && globalWaData.status !== 'CONNECTING' && (
+      {!dismissWa && globalWaData.status !== 'CONNECTED' && globalWaData.status !== 'CONNECTING' && globalWaData.status !== 'STARTING' && (
         <div className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-[#121212] border border-white/10 rounded-2xl p-8 max-w-md w-full shadow-2xl flex flex-col items-center text-center relative overflow-hidden animate-fade-in">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
@@ -825,6 +835,7 @@ function SdrCampaign() {
   const [batchCount, setBatchCount] = useState(16);
   const [batchSalesperson, setBatchSalesperson] = useState('Vitor Batista');
   const [batchService, setBatchService] = useState('criação de sites modernos e estratégicos');
+  const [batchTone, setBatchTone] = useState('variado');
   const [isGeneratingBatch, setIsGeneratingBatch] = useState(false);
 
   const handleGenerateBatchAI = async () => {
@@ -842,7 +853,8 @@ function SdrCampaign() {
           niche: batchNiche,
           count: batchCount,
           salesperson: batchSalesperson,
-          service: batchService
+          service: batchService,
+          tone: batchTone
         })
       });
       const data = await res.json();
@@ -994,6 +1006,18 @@ function SdrCampaign() {
               <Shuffle size={18} className="text-blue-400" /> Modelos de Mensagem <span className="text-xs text-gray-500 font-normal">({templates.length} variações)</span>
             </h3>
             <div className="flex gap-2">
+              {templates.length > 0 && (
+                <button 
+                  onClick={() => {
+                    if (window.confirm('Tem certeza que deseja apagar TODAS as mensagens da campanha?')) {
+                      saveTemplates([]);
+                    }
+                  }} 
+                  className="px-3 py-1.5 bg-red-500/10 text-red-400 border border-red-500/20 rounded-lg text-sm font-bold hover:bg-red-500 hover:text-white transition-colors flex items-center gap-1.5 shadow-[0_0_10px_rgba(239,68,68,0.1)]"
+                >
+                  <Trash2 size={14} /> Limpar Tudo
+                </button>
+              )}
               <button 
                 onClick={() => { setShowBatchForm(!showBatchForm); setShowNewForm(false); }} 
                 className="px-3 py-1.5 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-lg text-sm font-bold hover:bg-purple-500 hover:text-white transition-colors flex items-center gap-1.5 shadow-[0_0_10px_rgba(168,85,247,0.1)]"
@@ -1071,6 +1095,25 @@ function SdrCampaign() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 gap-4 mb-4 mt-4">
+                <div>
+                  <label className="text-xs text-purple-300 font-bold mb-2 flex items-center gap-1.5" style={{ display: 'block' }}>
+                    🎭 Tom / Estilo da Mensagem
+                  </label>
+                  <select 
+                    value={batchTone} 
+                    onChange={e => setBatchTone(e.target.value)} 
+                    className="w-full bg-black/50 border border-purple-500/30 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-purple-500"
+                  >
+                    <option value="variado">Variado (Recomendado - Mescla abordagens)</option>
+                    <option value="agressivo">Agressivo (Direto ao ponto, focado na venda)</option>
+                    <option value="curioso">Curioso (Gera curiosidade antes de oferecer)</option>
+                    <option value="consultivo">Consultivo (Foco em ajudar e empatia)</option>
+                    <option value="amigável">Amigável e Casual (Super informal)</option>
+                  </select>
+                </div>
+              </div>
+
               <div className="flex gap-3 pt-2">
                 <button 
                   onClick={handleGenerateBatchAI} 
@@ -1137,7 +1180,7 @@ function SdrCampaign() {
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button onClick={() => { setEditingId(t.id); setEditName(t.name); setEditText(t.content || t.text); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-blue-500 transition-colors"><PenLine size={12} /></button>
                       <button onClick={() => { navigator.clipboard.writeText(t.content || t.text); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-blue-500 transition-colors"><Copy size={12} /></button>
-                      {templates.length > 1 && <button onClick={() => { if (window.confirm('Excluir este modelo?')) saveTemplates(templates.filter(x => x.id !== t.id)); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-red-500 transition-colors"><Trash2 size={12} /></button>}
+                      <button onClick={() => { if (window.confirm('Excluir este modelo?')) saveTemplates(templates.filter(x => x.id !== t.id)); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-red-500 transition-colors"><Trash2 size={12} /></button>
                     </div>
                   </div>
                   <pre className="text-xs text-gray-400 whitespace-pre-wrap font-sans leading-relaxed max-h-32 overflow-y-auto">{t.content || t.text}</pre>

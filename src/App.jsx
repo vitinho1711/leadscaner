@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import SdrSystem from './components/SdrSystem';
 import Menu from './components/Menu';
+import LandingPage from './landing/LandingPage';
 import { Lock, ArrowRight, ShieldCheck, User, Clock, AlertCircle, Gift } from 'lucide-react';
 import './index.css';
 
@@ -38,6 +39,11 @@ function App() {
     const invite = params.get('invite');
     if (invite) {
       setInviteCode(invite);
+      setIsRegistering(true);
+    }
+    
+    // Also parse ?register=true to open register form on /login
+    if (params.get('register') === 'true') {
       setIsRegistering(true);
     }
   }, []);
@@ -82,7 +88,7 @@ function App() {
         setIsAuthenticated(true);
         setError('');
         // Clean invite param from URL
-        if (window.location.search.includes('invite')) {
+        if (window.location.search.includes('invite') || window.location.search.includes('register')) {
           window.history.replaceState({}, '', window.location.pathname);
         }
       } else {
@@ -103,6 +109,10 @@ function App() {
 
   if (isMenuPath) {
     return <Menu />;
+  }
+
+  if (!isAuthenticated && route === '/') {
+    return <LandingPage />;
   }
 
   if (!isAuthenticated) {
@@ -233,7 +243,7 @@ function App() {
       </header>
       
       <main className="flex-1 overflow-hidden relative">
-        <SdrSystem userRole={user?.role} planInfo={planInfo} />
+        <SdrSystem userRole={user?.role} planInfo={planInfo} handleLogout={handleLogout} />
       </main>
     </div>
   );

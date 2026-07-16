@@ -228,14 +228,13 @@ async function cleanSessionSafely(userId) {
   const sessionDir = path.join(AUTH_DIR, `session-${userId}`);
   try {
     if (fs.existsSync(sessionDir)) {
-      const files = fs.readdirSync(sessionDir);
-      for (const file of files) {
-        if (file.includes('-journal') || file.includes('-wal') || file.includes('.lock')) {
-          try { fs.unlinkSync(path.join(sessionDir, file)); } catch(e){}
-        }
-      }
+      // The previous logic of deleting just some files left corrupted state
+      // Removing the whole directory is the correct way to reset local auth
+      fs.rmSync(sessionDir, { recursive: true, force: true });
     }
-  } catch(e){}
+  } catch(e) {
+    console.error(`Erro ao limpar sessão do usuário ${userId}:`, e);
+  }
 }
 
 async function initUserWhatsApp(userId) {
@@ -244,7 +243,18 @@ async function initUserWhatsApp(userId) {
   
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: AUTH_DIR }),
-    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+    puppeteer: { 
+      headless: true, 
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+      ] 
+    }
   });
   
   whatsappClients[userId] = client;
@@ -301,7 +311,46 @@ async function initUserWhatsApp(userId) {
       if (!userChatSessions[userId][msg.from]) {
         userChatSessions[userId][msg.from] = [{
           role: "system",
-          content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${leadMatch.nome || 'Não informado'} - ${leadMatch.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o número que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
+          content: `Você é um SDR profissional especializado em prospecção de empresas para criação de sites premium.
+
+Seu objetivo é:
+* iniciar conversas naturais
+* gerar interesse
+* descobrir dores da empresa
+* qualificar o lead
+* levar a conversa até o agendamento
+
+Regras:
+* fale de forma humana
+* mensagens curtas
+* não pareça robô
+* nunca envie textos gigantes
+* use perguntas para continuar a conversa
+* seja persuasivo sem parecer insistente
+
+Quando o cliente disser:
+"não tenho interesse"
+Responda mostrando que hoje empresas perdem clientes por não terem presença profissional online.
+
+Quando o cliente perguntar preço:
+Nunca dê preço direto antes de entender o negócio.
+
+Seu foco é marcar uma apresentação.
+
+Você vende:
+* sites premium
+* estrutura de conversão
+* automação
+* posicionamento digital
+* integração WhatsApp
+* captação de clientes
+
+---
+CONTEXTO DO LEAD:
+Nome: ${leadMatch.nome || 'Não informado'}
+Nicho/Área: ${leadMatch.nicho || 'Não informado'}
+
+REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o número que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
         }];
       }
       userChatSessions[userId][msg.from].push({ role: "user", content: msg.body });
@@ -326,7 +375,7 @@ async function initUserWhatsApp(userId) {
     }
   });
 
-  client.initialize().catch(()=>{});
+  client.initialize().catch((err)=>{ console.error('[Bot Error] Falha na inicialização do WhatsApp:', err); });
 }
 
 async function autoReconnect(userId) {
@@ -1059,7 +1108,7 @@ Tone de voz escolhido: `;
 
 app.post('/api/ai/generate-batch-templates', checkTrialActive, async (req, res) => {
   try {
-    const { niche, count = 16, salesperson = 'Vitor Batista', service = 'criação de sites modernos e estratégicos' } = req.body;
+    const { niche, count = 16, salesperson = 'Vitor Batista', service = 'criação de sites modernos e estratégicos', tone = 'variado' } = req.body;
     const config = getUserConfig(req.user.id);
     if (!config.groqApiKey) return res.status(400).json({ error: 'Chave da API não configurada.' });
 
@@ -1080,7 +1129,7 @@ Diretrizes obrigatórias de cada mensagem:
    - {nicho} (segmento do lead, ex: "academia", "restaurante")
    - {cidade} (região do lead)
    - {emoji} ou {emoji_oi} (emojis casuais)
-7. Varie bastante o texto entre cada uma das ${totalToGenerate} mensagens (ex: algumas iniciando com elogio, outras mais diretas, outras gerando curiosidade, etc.).
+7. Tom das mensagens (MUITO IMPORTANTE): O usuário solicitou que as mensagens tenham um tom focado em: "${tone}". Adapte fortemente o estilo, vocabulário e a abordagem para refletir esse tom. Se o tom for "variado", alterne os estilos entre as mensagens (ex: algumas com elogio, outras mais diretas).
 8. Não retorne nenhum tipo de formatação em markdown no texto das mensagens. Retorne apenas o JSON.
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido, sem explicações adicionais, sem blocos de markdown adicionais, obedecendo a este formato exato:

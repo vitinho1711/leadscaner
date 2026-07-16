@@ -1,0 +1,254 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+:root {
+  --bg-dark: #02040A;
+  --bg-card: rgba(10, 15, 30, 0.6);
+  --primary: #3B82F6;
+  --primary-glow: rgba(59, 130, 246, 0.5);
+  --secondary: #7C3AED;
+  --secondary-glow: rgba(124, 58, 237, 0.5);
+  --accent: #22D3EE;
+  --danger: #EF4444;
+  --success: #10B981;
+  --text-main: #FFFFFF;
+  --text-muted: #94A3B8;
+  --border-light: rgba(255, 255, 255, 0.08);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-dark);
+  color: var(--text-main);
+  font-family: 'Inter', sans-serif;
+  overflow-x: hidden;
+}
+
+.lp-container {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* Background Grids & Networks */
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+  mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
+  pointer-events: none;
+}
+
+.bg-aurora {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: 
+    radial-gradient(circle at 15% 20%, rgba(124, 58, 237, 0.15) 0%, transparent 40%),
+    radial-gradient(circle at 85% 80%, rgba(59, 130, 246, 0.15) 0%, transparent 40%);
+  filter: blur(60px);
+  pointer-events: none;
+}
+
+/* Glassmorphism & Cards */
+.glass-panel {
+  background: var(--bg-card);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border-light);
+  border-radius: 1.5rem;
+}
+
+.feature-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-light);
+  border-radius: 1rem;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  position: relative;
+  overflow: hidden;
+}
+
+.feature-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  transform: translateX(-100%);
+  transition: transform 0.6s ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-5px);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(59, 130, 246, 0.3);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5), 0 0 20px rgba(59, 130, 246, 0.15);
+}
+
+.feature-card:hover::before {
+  transform: translateX(100%);
+}
+
+/* Buttons */
+.btn-primary {
+  background: var(--success);
+  color: white;
+  font-weight: 800;
+  padding: 1.25rem 2.5rem;
+  border-radius: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.4), inset 0 2px 5px rgba(255,255,255,0.2);
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary::after {
+  content: '';
+  position: absolute;
+  top: -50%; left: -50%; width: 200%; height: 200%;
+  background: radial-gradient(circle, rgba(255,255,255,0.3) 0%, transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  transform: scale(0.5);
+}
+
+.btn-primary:hover {
+  transform: scale(1.02) translateY(-2px);
+  box-shadow: 0 10px 30px rgba(16, 185, 129, 0.6), inset 0 2px 5px rgba(255,255,255,0.3);
+}
+
+.btn-primary:hover::after {
+  opacity: 1;
+  transform: scale(1);
+  transition: transform 0.5s ease-out, opacity 0.3s ease;
+}
+
+.btn-outline {
+  background: transparent;
+  color: white;
+  font-weight: 700;
+  padding: 1.25rem 2.5rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(255,255,255,0.2);
+  transition: all 0.3s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.btn-outline:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.4);
+}
+
+/* Gradients & Text */
+.text-gradient {
+  background: linear-gradient(135deg, var(--text-main) 0%, var(--primary) 50%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-purple {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 3D Dashboard Elements */
+.perspective-container {
+  perspective: 2000px;
+}
+
+.dashboard-3d {
+  transform: rotateX(15deg) rotateY(-15deg) rotateZ(5deg);
+  transform-style: preserve-3d;
+  transition: transform 0.5s ease;
+}
+
+.dashboard-3d:hover {
+  transform: rotateX(5deg) rotateY(-5deg) rotateZ(2deg) scale(1.02);
+}
+
+/* Animations */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-15px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.5; box-shadow: 0 0 20px var(--primary-glow); }
+  50% { opacity: 1; box-shadow: 0 0 40px var(--primary-glow); }
+}
+
+.glow-point {
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 15px var(--accent);
+  animation: pulse-glow 2s infinite;
+}
+
+/* Section Margins */
+.section-padding {
+  padding: 8rem 2rem;
+  max-width: 1300px;
+  margin: 0 auto;
+  position: relative;
+  z-index: 10;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-dark); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+/* Integration Logos grayscale */
+.grayscale-hover {
+  filter: grayscale(100%) opacity(0.5);
+  transition: all 0.3s ease;
+}
+.grayscale-hover:hover {
+  filter: grayscale(0%) opacity(1);
+}
+
+/* Hologram Brain */
+.brain-container {
+  position: relative;
+  width: 300px;
+  height: 300px;
+}
+
+.brain-core {
+  position: absolute;
+  inset: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.2) 0%, transparent 70%);
+  box-shadow: 0 0 50px rgba(59, 130, 246, 0.4), inset 0 0 30px rgba(124, 58, 237, 0.4);
+  animation: pulse-brain 4s infinite alternate;
+}
+
+@keyframes pulse-brain {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  100% { transform: scale(1.05); opacity: 1; }
+}

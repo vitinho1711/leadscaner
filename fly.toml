@@ -1,0 +1,37 @@
+# Configuração do Fly.io para o Lead Scanner
+# Gerado automaticamente — não edite manualmente
+
+app = 'lead-scanner-mvp'
+primary_region = 'gru'  # São Paulo, Brasil
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  NODE_ENV = 'production'
+  DATA_DIR = '/app/data'
+  PORT = '3001'
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'
+
+[mounts]
+  source = 'lead_scanner_data'
+  destination = '/app/data'
+
+[[statics]]
+  guest_path = '/app/dist'
+  url_prefix = '/'
