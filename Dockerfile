@@ -23,7 +23,7 @@ WORKDIR /app
 
 # Copiar arquivos do projeto
 COPY package*.json ./
-RUN npm install --production
+RUN npm install
 
 # Copiar o resto do código
 COPY . .
