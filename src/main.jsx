@@ -15,9 +15,6 @@ window.fetch = async function (resource, config) {
       config.headers['Authorization'] = `Bearer ${token}`;
     }
   }
-  if (typeof resource === 'string' && resource.startsWith('/api/')) {
-    resource = 'https://leadscaner.onrender.com' + resource;
-  }
   const response = await originalFetch(resource, config);
   if (response.status === 401 || response.status === 403) {
     if (resource !== '/api/auth/login') {
