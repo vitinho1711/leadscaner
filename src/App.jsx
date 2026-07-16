@@ -8,8 +8,8 @@ import './index.css';
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRegistering, setIsRegistering] = useState(false);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('123456');
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState('');
   const [user, setUser] = useState(null);
