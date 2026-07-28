@@ -7,10 +7,9 @@ import './index.css';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('123456');
-  const [inviteCode, setInviteCode] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [accessCode, setAccessCode] = useState('');
   const [error, setError] = useState('');
   const [user, setUser] = useState(null);
   const [planInfo, setPlanInfo] = useState(null);
@@ -31,21 +30,21 @@ function App() {
     const savedUser = localStorage.getItem('sdr_user');
     if (token && savedUser) {
       setIsAuthenticated(true);
-      setUser(JSON.parse(savedUser));
+      try {
+        setUser(JSON.parse(savedUser.startsWith('{') ? savedUser : atob(savedUser)));
+      } catch(e) {}
     }
 
-    // Parse ?invite=CODE from URL
-    const params = new URLSearchParams(window.location.search);
-    const invite = params.get('invite');
-    if (invite) {
-      setInviteCode(invite);
-      setIsRegistering(true);
-    }
-    
-    // Also parse ?register=true to open register form on /login
-    if (params.get('register') === 'true') {
-      setIsRegistering(true);
-    }
+    const handleStorage = () => {
+      const updatedUser = localStorage.getItem('sdr_user');
+      if (updatedUser) {
+        try {
+          setUser(JSON.parse(updatedUser.startsWith('{') ? updatedUser : atob(updatedUser)));
+        } catch(e) {}
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
   }, []);
 
   // Fetch plan info after login
@@ -71,10 +70,8 @@ function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     try {
-      const endpoint = isRegistering ? '/api/auth/register' : '/api/auth/login';
-      const body = isRegistering
-        ? { username, password, inviteCode }
-        : { username, password };
+      const endpoint = '/api/auth/login';
+      const body = { accessCode };
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -83,16 +80,16 @@ function App() {
       const data = await res.json();
       if (data.success) {
         localStorage.setItem('sdr_jwt_token', data.token);
-        localStorage.setItem('sdr_user', JSON.stringify(data.user));
+        localStorage.setItem('sdr_user', btoa(JSON.stringify(data.user)));
         setUser(data.user);
         setIsAuthenticated(true);
         setError('');
         // Clean invite param from URL
-        if (window.location.search.includes('invite') || window.location.search.includes('register')) {
+        if (window.location.search) {
           window.history.replaceState({}, '', window.location.pathname);
         }
       } else {
-        setError(data.error || (isRegistering ? 'Erro ao criar conta' : 'Erro ao fazer login'));
+        setError(data.error || 'Erro ao fazer login');
       }
     } catch (err) {
       setError('Erro de conexão com o servidor');
@@ -124,77 +121,33 @@ function App() {
               <Lock size={32} />
             </div>
           </div>
-          <h2 className="text-2xl font-bold text-center mb-2">{isRegistering ? 'Criar Conta' : 'Acesso Restrito'}</h2>
+          <h2 className="text-2xl font-bold text-center mb-2">Acesso Restrito</h2>
           <p className="text-gray-400 text-center mb-8 text-sm">
-            {isRegistering ? 'Crie sua conta para acessar o SDR.' : 'Faça login com sua conta corporativa para acessar o SDR.'}
+            Insira o seu Código de Acesso para entrar na plataforma.
           </p>
           
           <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <User size={18} className="text-gray-500" />
-                </div>
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Nome de Usuário"
-                  className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all placeholder:text-gray-600"
-                />
-              </div>
-            </div>
-            <div>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Lock size={18} className="text-gray-500" />
-                </div>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Senha"
-                  className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all placeholder:text-gray-600"
-                />
-              </div>
-            </div>
-            {isRegistering && (
               <div>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <Gift size={18} className="text-gray-500" />
+                    <Lock size={18} className="text-gray-500" />
                   </div>
                   <input
                     type="text"
-                    value={inviteCode}
-                    onChange={(e) => setInviteCode(e.target.value)}
-                    placeholder="Código de Convite"
-                    required
-                    className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-gray-600"
+                    value={accessCode}
+                    onChange={(e) => setAccessCode(e.target.value)}
+                    placeholder="Código de Acesso"
+                    className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all placeholder:text-gray-600 font-mono"
                   />
                 </div>
-                <p className="text-xs text-gray-500 mt-1.5 ml-1">Insira o código de convite recebido para criar sua conta trial.</p>
               </div>
-            )}
             {error && <p className="text-red-400 text-sm text-center font-medium">{error}</p>}
             <button
               type="submit"
               className="w-full py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 rounded-xl font-bold transition-all shadow-[0_0_15px_rgba(59,130,246,0.5)] hover:shadow-[0_0_25px_rgba(59,130,246,0.6)] flex items-center justify-center gap-2 mt-4"
             >
-              {isRegistering ? 'Criar Conta' : 'Entrar no Sistema'} <ArrowRight size={18} />
+              Entrar no Sistema <ArrowRight size={18} />
             </button>
-            <div className="text-center mt-4">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsRegistering(!isRegistering);
-                  setError('');
-                }}
-                className="text-sm text-blue-400 hover:text-blue-300 hover:underline transition-colors"
-              >
-                {isRegistering ? 'Já tem uma conta? Faça login' : 'Não tem conta? Criar uma'}
-              </button>
-            </div>
           </form>
         </div>
       </div>
@@ -221,7 +174,7 @@ function App() {
         <div className="flex items-center gap-2">
           <ShieldCheck size={18} className="text-green-400" />
           <span className="text-sm font-semibold text-gray-200">
-            Acesso: <span className="text-blue-400">{user?.username}</span> {user?.role === 'admin' ? '(Admin)' : ''}
+            Acesso: <span className="text-blue-400">{user?.username || 'Usuário'}</span> {user?.role === 'admin' ? '(Admin)' : ''}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -243,7 +196,7 @@ function App() {
       </header>
       
       <main className="flex-1 overflow-hidden relative">
-        <SdrSystem userRole={user?.role} planInfo={planInfo} handleLogout={handleLogout} />
+        <SdrSystem userRole={user?.role} userTier={user?.tier} planInfo={planInfo} handleLogout={handleLogout} />
       </main>
     </div>
   );

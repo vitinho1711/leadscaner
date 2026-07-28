@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { MessageSquare, Send, Reply, Briefcase, Search, Filter, Plus, Edit2, MoreHorizontal, Copy, Activity, Target, CheckCircle, Sparkles, Bot, Save, X, Trash2, TrendingUp, Shuffle, RefreshCcw, Wand2 } from 'lucide-react';
 
-export default function LeadScannerMessages() {
+export default function LeadScannerMessages({ planInfo, userTier }) {
   const [activeFilter, setActiveFilter] = useState('Primeiro Contato');
 
   const initialTemplates = [
@@ -200,7 +200,14 @@ export default function LeadScannerMessages() {
             </button>
           )}
           <button 
-            onClick={() => { setShowBatchForm(!showBatchForm); setIsEditing(false); }} 
+            onClick={() => {
+              if (userTier === 'basic') {
+                alert('⭐ Funcionalidade Exclusiva PRO!\n\nA geração de mensagens com Inteligência Artificial está disponível apenas no plano PRO. Faça o upgrade para criar mensagens que convertem 10x mais!');
+              } else {
+                setShowBatchForm(!showBatchForm); 
+                setIsEditing(false);
+              }
+            }} 
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 rounded-lg text-sm font-bold transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)]"
           >
             <Wand2 size={16} /> Gerar em Massa (IA)

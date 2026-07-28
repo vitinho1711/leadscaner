@@ -7,7 +7,7 @@ export default defineConfig({
   server: { 
     proxy: { '/api': 'http://localhost:3001' },
     watch: {
-      ignored: ['**/.wwebjs_auth/**', '**/.wwebjs_cache/**', '**/leads.json', '**/history.json', '**/users.json']
+      ignored: ['**/.wwebjs_auth/**', '**/.sdr_wwebjs_auth/**', '**/.wwebjs_cache/**', '**/leads.json', '**/history.json', '**/users.json']
     }
   },
   optimizeDeps: {

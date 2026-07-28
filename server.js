@@ -13,6 +13,10 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import nodemailer from 'nodemailer';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import compression from 'compression';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +51,7 @@ if (dbUsers.length === 0) {
     username: "admin",
     password: "$2b$10$7XdOQF6LU7yuKSuJuCgBDuA8ZDjPF3wgYj5WcVvlwRUpM2H2K7ew.", // 123456
     role: "admin",
+    tier: "pro",
     config: { groqApiKey: "", enableAutoResponder: true }
   });
   saveUsers();
@@ -65,20 +70,55 @@ function saveInvites() { try { fs.writeFileSync(INVITES_FILE, JSON.stringify(dbI
 const JWT_SECRET = process.env.JWT_SECRET || 'leadscanner_super_secret_key_2026';
 
 const app = express();
+app.use(helmet({
+  contentSecurityPolicy: false, // Desabilitado para não quebrar o React no front
+}));
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
-// --- AUTENTICAÇÃO ---
-app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body;
-  const user = dbUsers.find(u => u.username === username);
-  if (!user) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
-  if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
-  const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ success: true, token, user: { username: user.username, role: user.role } });
+// LIMITADORES DE REQUISIÇÃO (DDoS e Força Bruta)
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 2000, // Limite por IP
+  message: { error: 'Muitas requisições detectadas, tente novamente mais tarde.' }
+});
+app.use('/api', globalLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 20, // Apenas 20 tentativas de login/registro
+  message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' }
 });
 
-app.post('/api/auth/register', (req, res) => {
+// --- AUTENTICAÇÃO ---
+app.post('/api/auth/login', authLimiter, (req, res) => {
+  let { accessCode, username, password } = req.body;
+  
+  if (accessCode) {
+    accessCode = accessCode.trim().toUpperCase();
+    const user = dbUsers.find(u => u.accessCode === accessCode);
+    if (!user) return res.status(401).json({ error: 'Código de Acesso inválido' });
+    const tier = user.tier || (user.role === 'admin' ? 'pro' : 'basic');
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role, tier }, JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ success: true, token, user: { username: user.username, role: user.role, tier } });
+  }
+
+  if (!username || !password) return res.status(401).json({ error: 'Preencha todos os campos' });
+  
+  username = username.trim().toLowerCase();
+  password = password.trim();
+  
+  const user = dbUsers.find(u => u.username && u.username.toLowerCase() === username);
+  if (!user) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
+  if (!user.password || !bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Usuário ou senha inválidos' });
+  
+  const tier = user.tier || (user.role === 'admin' ? 'pro' : 'basic');
+  const token = jwt.sign({ id: user.id, username: user.username, role: user.role, tier }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ success: true, token, user: { username: user.username, role: user.role, tier } });
+});
+
+app.post('/api/auth/register', authLimiter, (req, res) => {
   const { username, password, inviteCode } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Preencha usuário e senha' });
   if (dbUsers.find(u => u.username === username)) return res.status(400).json({ error: 'Usuário já existe' });
@@ -131,8 +171,9 @@ app.post('/api/auth/register', (req, res) => {
   invite.usedAt = new Date().toISOString();
   saveInvites();
   
-  const token = jwt.sign({ id: newUser.id, username: newUser.username, role: newUser.role }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ success: true, token, user: { username: newUser.username, role: newUser.role } });
+  const tier = 'pro'; // Trials get pro by default
+  const token = jwt.sign({ id: newUser.id, username: newUser.username, role: newUser.role, tier }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ success: true, token, user: { username: newUser.username, role: newUser.role, tier } });
 });
 
 // ENDPOINTS PÚBLICOS (antes do middleware de autenticação)
@@ -150,6 +191,93 @@ app.get('/api/invite/validate/:code', (req, res) => {
   }
   res.json({ valid: true, trialDays: invite.trialDays || 7, maxLeads: invite.maxLeads || 50 });
 });
+
+  // ==========================================
+  // INTEGRAÇÃO CACTOO & ENVIO DE E-MAILS
+  // ==========================================
+
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: process.env.SMTP_PORT || 587,
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER || 'seu-email@gmail.com',
+      pass: process.env.SMTP_PASS || 'sua-senha-de-app'
+    }
+  });
+
+  app.post('/api/webhooks/cactoo', async (req, res) => {
+    try {
+      const payload = req.body;
+      console.log('Webhook Cactoo recebido:', payload);
+      
+      const status = payload.status || payload.event || '';
+      const isApproved = status.includes('approved') || status.includes('paid');
+
+      if (!isApproved) return res.status(200).json({ message: 'Ignorado' });
+
+      const data = payload.data || {};
+      const email = payload.email || payload.customer?.email || data.customer?.email;
+      const name = payload.name || payload.customer?.name || data.customer?.name || 'Cliente';
+      const docNumber = payload.customer?.docNumber || data.customer?.docNumber || '';
+      const amount = payload.amount || payload.transaction?.amount || data.amount || 0;
+      const productName = (payload.product?.name || payload.product || data.product?.name || '').toLowerCase();
+
+      if (!email) return res.status(400).json({ error: 'Email não fornecido.' });
+
+      let tier = 'pro';
+      if (amount === 96 || amount === 9600 || amount === 97 || amount === 9700 || productName.includes('basic')) tier = 'basic';
+      else if (amount === 167 || amount === 16700 || amount === 167.76 || amount === 16776 || productName.includes('pro')) tier = 'pro';
+
+      let user = dbUsers.find(u => u.username === email);
+      let accessCode = '';
+      
+      if (user) {
+        user.tier = tier;
+        if (!user.accessCode) {
+           const prefix = tier === 'pro' ? 'PRO' : 'BSC';
+           const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
+           user.accessCode = `${prefix}-${randomStr}`;
+        }
+        accessCode = user.accessCode;
+        saveUsers();
+      } else {
+        const prefix = tier === 'pro' ? 'PRO' : 'BSC';
+        const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
+        accessCode = `${prefix}-${randomStr}`;
+        
+        user = {
+          id: 'usr_' + Date.now(),
+          username: email,
+          accessCode: accessCode,
+          role: 'user',
+          tier: tier,
+          plan: { type: 'LIFETIME' },
+          createdAt: new Date().toISOString()
+        };
+        dbUsers.push(user);
+        saveUsers();
+      }
+
+      if (accessCode) {
+        const mailOptions = {
+          from: `"SDR Automator" <${process.env.SMTP_USER || 'vitorvitinhojulha@gmail.com'}>`,
+          to: email,
+          subject: 'Seu Acesso ao SDR Automator foi liberado! 🎉',
+          html: `<h2>Olá ${name}! Bem-vindo(a)!</h2><p>Plano: ${tier.toUpperCase()}</p><p>URL: https://leadscanne.com</p><p><strong>Seu Código de Acesso:</strong> ${accessCode}</p><p>Basta copiar este código e colar na tela inicial para entrar!</p>`
+        };
+        transporter.sendMail(mailOptions, (error, info) => {
+          if (error) console.error('Erro ao enviar email:', error);
+          else console.log('Email de acesso enviado:', info.response);
+        });
+      }
+
+      return res.status(200).json({ success: true });
+    } catch (error) {
+      console.error('Erro no webhook:', error);
+      return res.status(500).json({ error: 'Erro interno' });
+    }
+  });
 
 // MIDDLEWARE PROTEÇÃO
 app.use('/api', (req, res, next) => {
@@ -194,12 +322,23 @@ function checkTrialActive(req, res, next) {
   next();
 }
 
+function checkProTier(req, res, next) {
+  const dbUser = dbUsers.find(u => u.id === req.user.id);
+  if (!dbUser) return res.status(401).json({ error: 'Usuário não encontrado' });
+  if (dbUser.role === 'admin') return next();
+  if (dbUser.tier !== 'pro') {
+    return res.status(403).json({ error: 'Acesso restrito: Funcionalidade disponível apenas no plano PRO.', code: 'UPGRADE_REQUIRED' });
+  }
+  next();
+}
+
 // ESTADOS MULTI-TENANT
 const whatsappClients = {};
 const userWhatsappStatus = {};
 const userQrCodes = {};
 const userReconnectAttempts = {};
 const userChatSessions = {};
+const userChatState = {};
 
 const campaignStates = {};
 const autoSendEnabled = {};
@@ -237,26 +376,50 @@ const AUTH_DIR = path.join(DATA_DIR, '.sdr_wwebjs_auth');
 
 async function cleanSessionSafely(userId) {
   const sessionDir = path.join(AUTH_DIR, `session-${userId}`);
-  try {
-    if (fs.existsSync(sessionDir)) {
-      // The previous logic of deleting just some files left corrupted state
-      // Removing the whole directory is the correct way to reset local auth
+  if (!fs.existsSync(sessionDir)) return;
+  
+  for (let i = 0; i < 5; i++) {
+    try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
+      console.log(`Sessão do usuário ${userId} limpa.`);
+      return;
+    } catch (err) {
+      if (err.code === 'EBUSY' || err.code === 'ENOTEMPTY' || err.code === 'EPERM') {
+        console.warn(`Sessão ${userId} em uso. Tentativa ${i+1}...`);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } else {
+        console.error(`Erro ao limpar sessão ${userId}:`, err);
+        break;
+      }
     }
-  } catch(e) {
-    console.error(`Erro ao limpar sessão do usuário ${userId}:`, e);
   }
 }
 
-async function initUserWhatsApp(userId) {
+function isSamePhone(p1, p2) {
+  if (!p1 || !p2) return false;
+  const num1 = p1.replace(/\D/g, '');
+  const num2 = p2.replace(/\D/g, '');
+  if (num1 === num2) return true;
+  
+  if (num1.startsWith('55') && num2.startsWith('55')) {
+    const local1 = num1.substring(4);
+    const local2 = num2.substring(4);
+    if (local1.length === 9 && local2.length === 8 && local1.substring(1) === local2) return true;
+    if (local1.length === 8 && local2.length === 9 && local1 === local2.substring(1)) return true;
+  }
+  return num1.includes(num2) || num2.includes(num1);
+}
+
+function initUserWhatsApp(userId) {
   if (whatsappClients[userId]) return;
-  await cleanSessionSafely(userId);
   
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: AUTH_DIR }),
     puppeteer: { 
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: true, 
+      timeout: 60000,
+      protocolTimeout: 300000,
       args: [
         '--no-sandbox', 
         '--disable-setuid-sandbox',
@@ -266,11 +429,13 @@ async function initUserWhatsApp(userId) {
         '--no-zygote',
         '--disable-gpu'
       ] 
-    }
+    },
+    authTimeoutMs: 60000,
+    qrMaxRetries: 3
   });
   
   whatsappClients[userId] = client;
-  userWhatsappStatus[userId] = 'DISCONNECTED';
+  userWhatsappStatus[userId] = 'STARTING';
   userQrCodes[userId] = null;
   userReconnectAttempts[userId] = 0;
   userChatSessions[userId] = {};
@@ -304,65 +469,84 @@ async function initUserWhatsApp(userId) {
 
   client.on('message', async (msg) => {
     try {
+      console.log(`[BOT] Mensagem recebida de: ${msg.from} | Texto: ${msg.body}`);
       const config = getUserConfig(userId);
       if (!config.enableAutoResponder) return;
-      if (!msg.from.endsWith('@c.us') || msg.isStatus) return;
+      if ((!msg.from.endsWith('@c.us') && !msg.from.endsWith('@lid')) || msg.isStatus) return;
       
-      const senderNumber = msg.from.replace('@c.us', '');
-      const userLeads = dbLeads.filter(l => l.userId === userId);
-      const leadMatch = userLeads.find(l => {
-        if (!l.whatsapp) return false;
-        const cleanNum = String(l.whatsapp).replace(/\D/g, '');
-        return senderNumber.includes(cleanNum) || cleanNum.includes(senderNumber);
-      });
-      if (!leadMatch) return;
+      if (!msg.body || typeof msg.body !== 'string' || msg.body.trim() === '') {
+        console.log(`[BOT] Ignorando mensagem vazia de ${msg.from}`);
+        return;
+      }
       
       const contact = await msg.getContact();
-      if (contact.isMyContact) return;
+      let incomingPhone = contact.number || msg.from.split('@')[0];
+      
+      if (msg.from.includes('@lid')) {
+        try {
+          const lidInfo = await whatsappClients[userId].getContactLidAndPhone([msg.from]);
+          if (lidInfo && lidInfo.length > 0 && lidInfo[0].pn) {
+            const resolvedPhone = lidInfo[0].pn;
+            console.log(`[BOT] Resolvido LID ${msg.from} para telefone ${resolvedPhone}`);
+            incomingPhone = resolvedPhone;
+          }
+        } catch(e) {
+          console.error(`[BOT] Erro ao resolver LID para ${msg.from}:`, e);
+        }
+      }
+      
+      const userLeads = dbLeads.filter(l => l.userId === userId);
+      const leadMatch = userLeads.find(l => isSamePhone(l.whatsapp, incomingPhone));
+      
+      if (!leadMatch) {
+        console.log(`[BOT] Ignorado: ${incomingPhone} não é um lead (Leads no banco: ${userLeads.length})`);
+        return;
+      }
+      
+      // Update lead status if it's not already closed
+      const ls = (leadMatch.status || '').toUpperCase();
+      if (!['FECHADO', 'VENDIDO', 'CONVERTIDO', 'NEGOCIANDO'].includes(ls)) {
+        leadMatch.status = 'RESPONDIDO';
+        saveLeads();
+      }
+
+      // if (contact.isMyContact) return; // Comentado para permitir teste com o próprio contato salvo
+      console.log(`[BOT] Passou pelos filtros! Respondendo a ${incomingPhone}...`);
+
+      if (!userChatState[userId]) userChatState[userId] = {};
+      if (!userChatState[userId][msg.from]) {
+        userChatState[userId][msg.from] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'user', followUpCount: 0 };
+      } else {
+        userChatState[userId][msg.from].lastActivity = Date.now();
+        userChatState[userId][msg.from].lastSender = 'user';
+      }
+
+      if (userChatState[userId][msg.from].mode === 'HUMAN') {
+        return;
+      }
 
       if (!userChatSessions[userId][msg.from]) {
         userChatSessions[userId][msg.from] = [{
           role: "system",
-          content: `Você é um SDR profissional especializado em prospecção de empresas para criação de sites premium.
+          content: `Você se chama Vitor e é dono de uma agência de criação de sites premium.
 
 Seu objetivo é:
-* iniciar conversas naturais
-* gerar interesse
-* descobrir dores da empresa
-* qualificar o lead
-* levar a conversa até o agendamento
+* Conversar de forma natural, como um humano no WhatsApp.
+* Descobrir as dores da empresa e focar em AVANÇAR PARA O FECHAMENTO ou AGENDAR UMA REUNIÃO/CALL o mais rápido possível.
+* NÃO falar igual um robô, mas mantenha o tom profissional. NUNCA USE GÍRIAS. Seja direto e humano, mas educado.
+* RESPOSTAS CURTAS E DINÂMICAS: Alterne sempre entre mensagens curtas (1 linha) e normais (2-3 linhas). Evite textões a todo custo.
+* EXPERT EM OBJEÇÕES: Se o lead disser "não tenho interesse", concorde com ele primeiro e depois faça uma pergunta engajadora.
 
-Regras:
-* fale de forma humana
-* mensagens curtas
-* não pareça robô
-* nunca envie textos gigantes
-* use perguntas para continuar a conversa
-* seja persuasivo sem parecer insistente
-
-Quando o cliente disser:
-"não tenho interesse"
-Responda mostrando que hoje empresas perdem clientes por não terem presença profissional online.
-
-Quando o cliente perguntar preço:
-Nunca dê preço direto antes de entender o negócio.
-
-Seu foco é marcar uma apresentação.
-
-Você vende:
-* sites premium
-* estrutura de conversão
-* automação
-* posicionamento digital
-* integração WhatsApp
-* captação de clientes
+Regra de Ouro 1: NUNCA DÊ O PREÇO.
+Regra de Ouro 2: Você SÓ deve colocar a palavra exata [HANDOFF] no final da resposta se o cliente EXPLICITAMENTE PERGUNTAR O PREÇO ou ESTIVER PRONTO PARA COMPRAR/FECHAR.
+Regra de Ouro 3: Se a mensagem do cliente parecer uma RESPOSTA AUTOMÁTICA ou um ROBÔ de atendimento (ex: "No momento não estamos atendendo", "Seja bem vindo"), você deve enviar uma ÚNICA mensagem pedindo para falar com o dono ou vendedor e, OBRIGATORIAMENTE, incluir a tag [HANDOFF] no final da sua resposta para encerrar o bot automático.
 
 ---
 CONTEXTO DO LEAD:
 Nome: ${leadMatch.nome || 'Não informado'}
 Nicho/Área: ${leadMatch.nicho || 'Não informado'}
 
-REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o número que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
+REGRA: Se a mensagem do lead parecer um robô com menu de opções, responda APENAS com o dígito numérico (ex: 1, 2 ou 3) correspondente ao comercial.`
         }];
       }
       userChatSessions[userId][msg.from].push({ role: "user", content: msg.body });
@@ -370,18 +554,45 @@ REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com 
         userChatSessions[userId][msg.from] = [userChatSessions[userId][msg.from][0], ...userChatSessions[userId][msg.from].slice(-10)];
       }
       
-      const chat = await msg.getChat();
-      await chat.sendStateTyping();
+      
+      let chat = null;
+      // try { chat = await msg.getChat(); } catch (e) {} // Removido porque está travando infinitamente no whatsapp-web.js para contas @lid
 
       const openai = getOpenAIInstance(userId);
+      console.log(`[BOT] Solicitando resposta da IA...`);
       const completion = await openai.chat.completions.create({
         model: "llama-3.3-70b-versatile",
         messages: userChatSessions[userId][msg.from],
-        temperature: 0.7, max_tokens: 150,
+        temperature: 0.7, max_tokens: 150
       });
       const reply = completion.choices[0].message.content;
+      console.log(`[BOT] IA Respondeu: ${reply}`);
+
+      if (reply.includes('[HANDOFF]')) {
+        const cleanReply = reply.replace(/\[HANDOFF\]/g, '').trim();
+        userChatState[userId][msg.from] = { mode: 'HUMAN' };
+        
+        if (cleanReply) {
+          // try { if (chat) await chat.sendStateTyping(); } catch(e) {}
+          await new Promise(r => setTimeout(r, Math.min(cleanReply.length * 50, 4000)));
+          await msg.reply(cleanReply);
+          userChatSessions[userId][msg.from].push({ role: "assistant", content: cleanReply });
+          userChatState[userId][msg.from].lastActivity = Date.now();
+          userChatState[userId][msg.from].lastSender = 'bot';
+        }
+        
+        const myNumber = client.info.wid._serialized;
+        await client.sendMessage(myNumber, `🚨 *ALERTA DE TRANSBORDO* 🚨\nO lead *${leadMatch.nome || msg.from.replace('@c.us', '')}* quer saber preço/prévia!\n\nAssuma a conversa.`);
+        return;
+      }
+
+      // try { if (chat) await chat.sendStateTyping(); } catch(e) {}
+      await new Promise(r => setTimeout(r, Math.min(reply.length * 50, 4000)));
+
       userChatSessions[userId][msg.from].push({ role: "assistant", content: reply });
       await msg.reply(reply);
+      userChatState[userId][msg.from].lastActivity = Date.now();
+      userChatState[userId][msg.from].lastSender = 'bot';
     } catch (error) {
       console.error('[Bot Error]', error);
     }
@@ -395,7 +606,6 @@ async function autoReconnect(userId) {
   userReconnectAttempts[userId]++;
   if (userReconnectAttempts[userId] > 5) { userReconnectAttempts[userId] = 0; return; }
   try { 
-    await cleanSessionSafely(userId); 
     if (whatsappClients[userId]) await whatsappClients[userId].initialize(); 
     userReconnectAttempts[userId] = 0; 
   }
@@ -405,17 +615,64 @@ async function autoReconnect(userId) {
 // ENDPOINTS WHATSAPP
 app.get('/api/whatsapp/status', checkTrialActive, (req, res) => {
   const userId = req.user.id;
-  if (!whatsappClients[userId]) {
-    initUserWhatsApp(userId);
-  }
-  res.json({ status: userWhatsappStatus[userId] || 'STARTING', qr: userQrCodes[userId] || null });
+  res.json({ status: userWhatsappStatus[userId] || 'DISCONNECTED', qr: userQrCodes[userId] || null });
 });
 
 app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
   if (userWhatsappStatus[userId] === 'CONNECTED') return res.json({ success: true, message: 'Já conectado!' });
   res.json({ success: true, message: 'Reconexão iniciada.' });
-  try { await cleanSessionSafely(userId); if(whatsappClients[userId]) await whatsappClients[userId].initialize(); } catch (err) {}
+  try {
+    userWhatsappStatus[userId] = 'DISCONNECTING';
+    if(whatsappClients[userId]) {
+      // Destrói sessão local que está falhando
+      try { await whatsappClients[userId].destroy(); } catch(e) {}
+      delete whatsappClients[userId];
+    }
+    await cleanSessionSafely(userId);
+    initUserWhatsApp(userId);
+  } catch (err) {}
+});
+
+app.post('/api/whatsapp/disconnect', checkTrialActive, async (req, res) => {
+  const userId = req.user.id;
+  userWhatsappStatus[userId] = 'DISCONNECTING';
+  
+  try {
+    if (whatsappClients[userId]) {
+      try { await whatsappClients[userId].logout(); } catch(e) {}
+      try { await whatsappClients[userId].destroy(); } catch(e) {}
+      delete whatsappClients[userId];
+    }
+    await cleanSessionSafely(userId);
+  } catch (e) {
+    console.error('Erro no logout do WhatsApp:', e);
+  }
+
+  userWhatsappStatus[userId] = 'DISCONNECTED';
+  userQrCodes[userId] = null;
+  res.json({ success: true, message: 'Desconectado com sucesso.' });
+});
+
+app.get('/api/debug/bot-number', (req, res) => {
+  const client = whatsappClients['1'];
+  if (client && client.info) {
+    res.json({ number: client.info.wid.user });
+  } else {
+    res.json({ number: 'Not connected or no info' });
+  }
+});
+
+// PROFILE
+app.post('/api/user/profile', (req, res) => {
+  const { username } = req.body;
+  const user = dbUsers.find(u => u.id === req.user.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (username !== undefined) {
+    user.username = username;
+    saveUsers();
+  }
+  res.json({ success: true, username: user.username });
 });
 
 // CONFIGURAÇÕES
@@ -423,7 +680,7 @@ app.get('/api/config', checkTrialActive, (req, res) => {
   res.json(getUserConfig(req.user.id));
 });
 
-app.post('/api/config', checkTrialActive, (req, res) => {
+app.post('/api/config', checkTrialActive, checkProTier, (req, res) => {
   const { groqApiKey, autoResponder } = req.body;
   const user = dbUsers.find(u => u.id === req.user.id);
   if (!user.config) user.config = { groqApiKey: '', enableAutoResponder: true };
@@ -433,6 +690,65 @@ app.post('/api/config', checkTrialActive, (req, res) => {
   
   saveUsers();
   res.json({ success: true });
+});
+
+// GERADOR DE MENSAGENS COM IA
+app.post('/api/whatsapp/campaign/generate-templates', checkTrialActive, checkProTier, async (req, res) => {
+  const { modelMessage, vibe, count } = req.body;
+  const userId = req.user.id;
+  const qty = Math.min(Math.max(parseInt(count) || 5, 1), 20);
+
+  if (!modelMessage) return res.status(400).json({ error: 'Mensagem modelo é obrigatória.' });
+
+  const prompt = `Você é um Copywriter de Elite especialista em prospecção B2B (Cold Outreach) pelo WhatsApp.
+O usuário quer gerar variações de uma mensagem base para não cair em filtros de spam do WhatsApp.
+
+Sua tarefa:
+Crie EXATAMENTE ${qty} variações únicas e diferentes para a mensagem modelo abaixo.
+Mantenha os placeholders (como {nome}, {empresa}, etc) se eles existirem na original.
+Mantenha exatamente o mesmo objetivo da mensagem, mas reescreva com estruturas, palavras e gatilhos diferentes.
+DIRECIONAMENTO/VIBE: ${vibe || 'Nenhum direcionamento específico.'}
+
+MENSAGEM MODELO:
+"${modelMessage}"
+
+RETORNE APENAS UM JSON VÁLIDO no seguinte formato, sem nenhum outro texto:
+{
+  "templates": [
+    "Variação 1...",
+    "Variação 2..."
+  ]
+}`;
+
+  try {
+    const openai = getOpenAIInstance(userId);
+    const completion = await openai.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.8,
+      max_tokens: 4096,
+      response_format: { type: "json_object" }
+    });
+
+    let raw = completion.choices[0].message.content;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      // Tentar limpar blocos de código se Llama não respeitar o json_object puro
+      raw = raw.replace(/^```json\n?/i, '').replace(/\n?```$/i, '').trim();
+      parsed = JSON.parse(raw);
+    }
+
+    if (!parsed.templates || !Array.isArray(parsed.templates)) {
+      throw new Error("Formato de JSON inválido retornado pela IA.");
+    }
+
+    res.json({ success: true, templates: parsed.templates });
+  } catch (e) {
+    console.error('Erro ao gerar templates:', e);
+    res.status(500).json({ error: 'Falha ao gerar mensagens. Verifique sua chave Groq e tente novamente.' });
+  }
 });
 
 // GERADOR DE SITES COM IA
@@ -558,6 +874,17 @@ app.delete('/api/leads/:id', checkTrialActive, (req, res) => {
   else res.status(404).json({ error: 'Não encontrado' });
 });
 
+app.put('/api/leads/:id/status', checkTrialActive, (req, res) => {
+  const lead = dbLeads.find(l => l.userId === req.user.id && (l.id === req.params.id || l.whatsapp === req.params.id));
+  if (lead) {
+    lead.status = req.body.status;
+    saveLeads();
+    res.json({ success: true, lead });
+  } else {
+    res.status(404).json({ error: 'Não encontrado' });
+  }
+});
+
 app.post('/api/leads/clean', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
   if (userWhatsappStatus[userId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
@@ -638,7 +965,7 @@ app.get('/api/autosend/status', checkTrialActive, (req, res) => {
   res.json({ enabled: !!autoSendEnabled[userId], running: !!autoSendRunning[userId], stats: autoSendStats[userId], pendingCount });
 });
 
-app.post('/api/autosend/toggle', checkTrialActive, (req, res) => {
+app.post('/api/autosend/toggle', checkTrialActive, checkProTier, (req, res) => {
   const userId = req.user.id;
   // Check message limit for trial users
   if (req.dbUser && req.dbUser.plan) {
@@ -694,10 +1021,13 @@ async function startAutoSendLoop(userId) {
       if (!userChatSessions[userId][contactId._serialized]) {
         userChatSessions[userId][contactId._serialized] = [{
           role: "system",
-          content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${pending.nome || 'Não informado'} - ${pending.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o número que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
+          content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${pending.nome || 'Não informado'} - ${pending.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o DÍGITO correspondente à opção (ex: 1, 2 ou 3) que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
         }];
       }
       userChatSessions[userId][contactId._serialized].push({ role: "assistant", content: msg });
+      
+      if (!userChatState[userId]) userChatState[userId] = {};
+      userChatState[userId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
       
       pending.messageSent = true; pending.messageSentAt = new Date().toISOString(); pending.messageStatus = 'ENVIADO'; pending.status = 'CHAMADO'; pending.lastInteraction = pending.messageSentAt; saveLeads();
       autoSendStats[userId].sent++; autoSendStats[userId].lastSentAt = pending.messageSentAt; autoSendStats[userId].lastLeadName = pending.nome;
@@ -731,12 +1061,12 @@ app.get('/api/whatsapp/campaign/status', checkTrialActive, (req, res) => {
   res.json(campaignStates[userId]);
 });
 
-app.post('/api/whatsapp/campaign/stop', checkTrialActive, (req, res) => { 
+app.post('/api/whatsapp/campaign/stop', checkTrialActive, checkProTier, (req, res) => { 
   if (campaignStates[req.user.id]) campaignStates[req.user.id].shouldStop = true; 
   res.json({ success: true }); 
 });
 
-app.post('/api/whatsapp/campaign/start', checkTrialActive, async (req, res) => {
+app.post('/api/whatsapp/campaign/start', checkTrialActive, checkProTier, async (req, res) => {
   const userId = req.user.id;
   if (userWhatsappStatus[userId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
   if (campaignStates[userId]?.isRunning) return res.status(400).json({ error: 'Campanha já rodando' });
@@ -795,10 +1125,13 @@ async function processCampaign(userId, leads, templates, delayMin, delayMax, bat
       if (!userChatSessions[userId][contactId._serialized]) {
         userChatSessions[userId][contactId._serialized] = [{
           role: "system",
-          content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${lead.nome || 'Não informado'} - ${lead.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o número que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
+          content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${lead.nome || 'Não informado'} - ${lead.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o DÍGITO correspondente à opção (ex: 1, 2 ou 3) que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
         }];
       }
       userChatSessions[userId][contactId._serialized].push({ role: "assistant", content: message });
+      
+      if (!userChatState[userId]) userChatState[userId] = {};
+      userChatState[userId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
       
       const dbLead = dbLeads.find(l => l.id === lead.id);
       if (dbLead) {
@@ -861,7 +1194,7 @@ app.get('/api/whatsapp/templates', checkTrialActive, (req, res) => {
   }
   res.json({ data: userTemplates });
 });
-app.post('/api/whatsapp/templates', checkTrialActive, (req, res) => { 
+app.post('/api/whatsapp/templates', checkTrialActive, checkProTier, (req, res) => { 
   const incoming = req.body.templates || [];
   const otherTemplates = campaignTemplates.filter(t => t.userId !== req.user.id);
   const userTpls = incoming.map(t => ({ ...t, userId: req.user.id }));
@@ -916,45 +1249,76 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
     await page.setViewport({ width: 1280, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8' });
 
-    await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    await new Promise(r => setTimeout(r, 5000));
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const type = req.resourceType();
+      if (['image', 'font', 'stylesheet', 'media'].includes(type)) req.abort();
+      else req.continue();
+    });
+
+    await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await new Promise(r => setTimeout(r, 1500));
 
     try {
       const consentSelectors = ['button[aria-label*="Aceitar"]', 'button[aria-label*="Accept"]', 'form[action*="consent"] button', 'button[jsname="b3VHJd"]', '[data-consent-set]', 'button.VfPpkd-LgbsSe'];
       for (const sel of consentSelectors) {
         const btn = await page.$(sel);
-        if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 3000)); break; }
+        if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 1000)); break; }
       }
     } catch {}
 
-    try { await page.waitForSelector('div[role="feed"]', { timeout: 30000 }); } 
-    catch {
-      try { await page.waitForSelector('a[href*="/maps/place/"]', { timeout: 15000 }); } 
-      catch {
-        await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`, { waitUntil: 'domcontentloaded', timeout: 90000 });
-        await new Promise(r => setTimeout(r, 8000));
-        try { await page.waitForSelector('div[role="feed"]', { timeout: 20000 }); } catch {}
-      }
+    try { 
+      await page.waitForFunction(() => {
+        return document.querySelector('div[role="feed"]') || 
+               document.querySelector('a[href*="/maps/place/"]') ||
+               document.querySelector('.m6QErb');
+      }, { timeout: 15000 });
+    } catch (e) {
+      console.log(`[User ${userId}] Timeout esperando resultados. Retornando vazio.`);
+      if (browser) await browser.close();
+      return res.json({ data: [], added: 0, total: dbLeads.filter(l => l.userId === userId).length, error: 'Nenhum resultado encontrado para a busca' });
     }
     
     let previousCount = 0; let sameCountRounds = 0;
-    while (sameCountRounds < 5) {
+    while (sameCountRounds < 8) {
       await page.evaluate(() => {
-        const feed = document.querySelector('div[role="feed"]') || document.querySelector('div.m6QErb.DxyBCb') || document.querySelector('div.m6QErb');
-        if (feed) feed.scrollTop = feed.scrollHeight;
+        // Try multiple ways to scroll the feed
+        const feed = document.querySelector('div[role="feed"]');
+        if (feed) {
+          feed.scrollBy(0, 5000);
+          feed.scrollTop = feed.scrollHeight;
+        }
+        const items = document.querySelectorAll('a[href*="/maps/place/"]');
+        if (items.length > 0) {
+          items[items.length - 1].scrollIntoView();
+        }
       });
-      await new Promise(r => setTimeout(r, 2000));
+      // Wait a bit longer for network requests to finish
+      await new Promise(r => setTimeout(r, 2500));
+      
       const currentCount = await page.evaluate(() => document.querySelectorAll('a[href*="/maps/place/"]').length);
-      if (currentCount === previousCount) sameCountRounds++; else sameCountRounds = 0;
+      console.log(`[User ${userId}] Scroll progress: ${currentCount} items found.`);
+      if (currentCount === previousCount) sameCountRounds++; 
+      else sameCountRounds = 0;
       previousCount = currentCount;
+      
       const endOfList = await page.evaluate(() => {
-        for (const s of document.querySelectorAll('span, p')) {
-          const t = (s.textContent || '').toLowerCase();
-          if (t.includes('final da lista') || t.includes('end of') || t.includes('não há mais resultados')) return true;
+        const textElements = document.querySelectorAll('span, p, div');
+        for (const el of textElements) {
+          const t = (el.textContent || '').toLowerCase();
+          if (t === 'você chegou ao final da lista' || t.includes('não há mais resultados') || t.includes('you\'ve reached the end of the list')) return true;
         }
         return false;
       });
-      if (endOfList || currentCount >= maxLeads) break;
+      
+      if (endOfList) {
+        console.log(`[User ${userId}] Chegou ao final da lista.`);
+        break;
+      }
+      if (currentCount >= maxLeads) {
+        console.log(`[User ${userId}] Atingiu o limite de leads da busca (${maxLeads}).`);
+        break;
+      }
     }
     
     const hrefs = await page.evaluate((maxResults) => {
@@ -978,8 +1342,15 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
         try {
           p = await browser.newPage();
           await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-          await p.goto(href, { waitUntil: 'domcontentloaded', timeout: 20000 });
-          await new Promise(r => setTimeout(r, 1500));
+          
+          await p.setRequestInterception(true);
+          p.on('request', req => {
+            if (['image', 'font', 'stylesheet', 'media'].includes(req.resourceType())) req.abort();
+            else req.continue();
+          });
+
+          await p.goto(href, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await new Promise(r => setTimeout(r, 500));
 
           const extracted = await p.evaluate(() => {
             const getTitle = () => document.querySelector('h1')?.textContent?.trim() || '';
@@ -1021,6 +1392,31 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
                site: getSite()
             };
           });
+
+          // BUSCA RÁPIDA DE E-MAIL E INSTAGRAM NO SITE DO LEAD
+          extracted.email = '';
+          extracted.instagram = '';
+          if (extracted.site && extracted.site !== 'n\u00E3o informado' && extracted.site.startsWith('http')) {
+             try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 segundos limite
+                const res = await fetch(extracted.site, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+                clearTimeout(timeoutId);
+                const html = await res.text();
+                
+                // Extrair Instagram
+                const igMatch = html.match(/https?:\/\/(?:www\.)?instagram\.com\/([a-zA-Z0-9_.-]+)/i);
+                if (igMatch) extracted.instagram = igMatch[1];
+                
+                // Extrair Email
+                const emailMatch = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                if (emailMatch && !emailMatch[0].includes('sentry.io') && !emailMatch[0].includes('wixpress.com') && !emailMatch[0].includes('sprint')) {
+                    extracted.email = emailMatch[0];
+                }
+             } catch (e) {
+                // Falhas silenciosas de timeout ou CORS
+             }
+          }
 
           return extracted;
         } catch (e) {
@@ -1088,7 +1484,7 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
 });
 
 // AI & CHAT
-app.post('/api/ai/generate-template', checkTrialActive, async (req, res) => {
+app.post('/api/ai/generate-template', checkTrialActive, checkProTier, async (req, res) => {
   try {
     const { tone } = req.body;
     const config = getUserConfig(req.user.id);
@@ -1119,7 +1515,7 @@ Tone de voz escolhido: `;
   }
 });
 
-app.post('/api/ai/generate-batch-templates', checkTrialActive, async (req, res) => {
+app.post('/api/ai/generate-batch-templates', checkTrialActive, checkProTier, async (req, res) => {
   try {
     const { niche, count = 16, salesperson = 'Vitor Batista', service = 'criação de sites modernos e estratégicos', tone = 'variado' } = req.body;
     const config = getUserConfig(req.user.id);
@@ -1163,7 +1559,9 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido, sem explicações adicionais, sem
       response_format: { type: "json_object" }
     });
 
-    const result = JSON.parse(completion.choices[0].message.content.trim());
+    const rawContent = completion.choices[0].message.content.trim();
+    const cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
+    const result = JSON.parse(cleanContent);
     if (!result || !Array.isArray(result.templates)) {
       throw new Error("Formato inválido retornado pela IA");
     }
@@ -1307,13 +1705,126 @@ app.get('/api/admin/testers', (req, res) => {
   res.json({ data: testers });
 });
 
+// --- SISTEMA DE FOLLOW-UP ESTRATÉGICO ---
+setInterval(async () => {
+  const now = Date.now();
+  // 6 hours in milliseconds = 6 * 60 * 60 * 1000
+  const FOLLOW_UP_TIME = 6 * 60 * 60 * 1000;
+
+  for (const userId in userChatState) {
+    for (const number in userChatState[userId]) {
+      const state = userChatState[userId][number];
+      
+      // Check if bot was the last to send a message and 2 hours have passed, and no follow up was sent yet.
+      if (state.mode === 'BOT' && state.lastSender === 'bot' && state.followUpCount === 0 && (now - state.lastActivity) > FOLLOW_UP_TIME) {
+        
+        // Ensure client is connected
+        const cl = whatsappClients[userId];
+        if (!cl || !cl.info) continue;
+
+        try {
+          console.log(`[BOT] Acionando follow-up automático para ${number} do usuário ${userId}`);
+          
+          const openai = getOpenAIInstance(userId);
+          const contextMsg = {
+            role: "system",
+            content: "O cliente parou de responder há algumas horas. Faça um follow-up BEM CURTO (1 linha no máximo) e estratégico para puxar assunto de volta. Por exemplo: 'E aí, conseguiu pensar a respeito?' ou 'Ficou alguma dúvida sobre o que conversamos?'."
+          };
+          
+          userChatSessions[userId][number].push(contextMsg);
+          
+          const completion = await openai.chat.completions.create({
+            model: "llama-3.3-70b-versatile",
+            messages: userChatSessions[userId][number],
+            temperature: 0.7, max_tokens: 50
+          });
+          const reply = completion.choices[0].message.content;
+          
+          // Send message
+          await cl.sendMessage(number, reply);
+          console.log(`[BOT] Follow-up enviado para ${number}: ${reply}`);
+          
+          // Clean up context message and push the actual response
+          userChatSessions[userId][number] = userChatSessions[userId][number].filter(m => m !== contextMsg);
+          userChatSessions[userId][number].push({ role: "assistant", content: reply });
+          
+          // Update state
+          state.lastActivity = Date.now();
+          state.lastSender = 'bot';
+          state.followUpCount = 1; // Mark as follow-up sent to avoid spamming
+          
+        } catch (err) {
+          console.error(`[BOT] Erro ao enviar follow-up para ${number}`, err);
+        }
+      }
+    }
+  }
+}, 10 * 60 * 1000); // Check every 10 minutes
+
+// --- SISTEMA DE BACKUP AUTOMÁTICO ---
+const BACKUP_DIR = path.join(__dirname, 'backups');
+if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+
+function performBackup() {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const currentBackupDir = path.join(BACKUP_DIR, timestamp);
+    fs.mkdirSync(currentBackupDir, { recursive: true });
+
+    const filesToBackup = ['leads.json', 'users.json', 'campaign_templates.json', 'history.json', 'invites.json'];
+    filesToBackup.forEach(file => {
+      const src = path.join(DATA_DIR, file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, path.join(currentBackupDir, file));
+      }
+    });
+    console.log(`[BACKUP] Backup realizado com sucesso em: ${currentBackupDir}`);
+
+    // Limpeza de backups antigos (mais de 7 dias)
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    fs.readdirSync(BACKUP_DIR).forEach(folder => {
+      const folderPath = path.join(BACKUP_DIR, folder);
+      const stats = fs.statSync(folderPath);
+      if (stats.isDirectory() && (now - stats.mtimeMs) > MAX_AGE_MS) {
+        fs.rmSync(folderPath, { recursive: true, force: true });
+        console.log(`[BACKUP] Backup antigo removido: ${folder}`);
+      }
+    });
+  } catch (err) {
+    console.error('[BACKUP] Erro ao realizar backup:', err.message);
+  }
+}
+// Run backup every 12 hours
+setInterval(performBackup, 12 * 60 * 60 * 1000);
+// Run once on startup
+setTimeout(performBackup, 5000); // Wait 5s before first backup
+
 const PORT = process.env.PORT || 3001;
 
-app.use(express.static(path.join(__dirname, 'dist')));
+app.use(express.static(path.join(__dirname, 'dist'), {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+    }
+  }
+}));
+
 app.get(/(.*)/, (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 app.listen(PORT, () => {
   console.log(`\n🤖 BOT SDR V2.0 MULTI-TENANT - ONLINE NA PORTA ${PORT}\n`);
+  
+  // Start WhatsApp automatically for all users in the background
+  dbUsers.forEach(u => {
+    try {
+      initUserWhatsApp(u.id);
+    } catch(e) {
+      console.error(`Erro ao iniciar WhatsApp para usuário ${u.id}:`, e);
+    }
+  });
 });

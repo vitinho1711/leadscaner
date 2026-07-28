@@ -13,14 +13,14 @@ import {
   CheckCircle, Zap, ShieldCheck, ChevronRight, Activity, Bell, Send,
   Target, BarChart2, MessageCircle, RefreshCcw, Trash2,
   Megaphone, Play, Square, Plus, PenLine, Copy, AlertTriangle, Shuffle,
-  Power, Rocket, RotateCcw, Pause, LayoutDashboard, PlusCircle, History, Mail, Settings, User, LogOut, Monitor, Gift
+  Power, Rocket, RotateCcw, Pause, LayoutDashboard, PlusCircle, History, Mail, Settings, User, LogOut, Monitor, Gift, Sparkles, Loader2
 } from 'lucide-react';
 
-export default function SdrSystem({ userRole, planInfo, handleLogout }) {
+export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [notifications, setNotifications] = useState([]);
   const [globalWaData, setGlobalWaData] = useState({ status: 'CONNECTING', qr: null });
-  const [dismissWa, setDismissWa] = useState(false);
+  const [dismissWa, setDismissWa] = useState(true);
   
   // Notification Demo
   useEffect(() => {
@@ -39,7 +39,11 @@ export default function SdrSystem({ userRole, planInfo, handleLogout }) {
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         if (res.ok) {
-          setGlobalWaData(await res.json());
+          const data = await res.json();
+          setGlobalWaData(data);
+          if (data.status === 'CONNECTED') {
+            setDismissWa(true);
+          }
         } else if (res.status === 401) {
           // If unauthorized, don't trigger the modal error state yet
           setGlobalWaData({ status: 'CONNECTING', qr: null });
@@ -186,9 +190,9 @@ export default function SdrSystem({ userRole, planInfo, handleLogout }) {
       <div className="flex-1 overflow-y-auto bg-[#0a0a0f] p-8 relative">
         {activeTab === 'dashboard' && <LeadScannerDashboard setActiveTab={setActiveTab} planInfo={planInfo} />}
         {activeTab === 'nova_analise' && <LeadScannerAnalysis setActiveTab={setActiveTab} />}
-        {activeTab === 'leads_qualificados' && <LeadScannerLeads setActiveTab={setActiveTab} />}
+        {activeTab === 'leads_qualificados' && <LeadScannerLeads setActiveTab={setActiveTab} userTier={userTier} />}
         {activeTab === 'historico' && <LeadScannerHistory />}
-        {activeTab === 'mensagens' && <LeadScannerMessages planInfo={planInfo} />}
+        {activeTab === 'mensagens' && <LeadScannerMessages planInfo={planInfo} userTier={userTier} />}
         {activeTab === 'convites' && <LeadScannerInvites />}
         
 
@@ -198,7 +202,7 @@ export default function SdrSystem({ userRole, planInfo, handleLogout }) {
         {activeTab === 'prompts_site' && <SdrSitePrompts />}
         
         {activeTab === 'admin' && <SdrAdmin />}
-        {activeTab === 'configuracoes' && <LeadScannerSettings />}
+        {activeTab === 'configuracoes' && <LeadScannerSettings userTier={userTier} />}
         {activeTab === 'conta' && <LeadScannerAccount />}
       </div>
 
@@ -218,6 +222,19 @@ export default function SdrSystem({ userRole, planInfo, handleLogout }) {
             {globalWaData.status === 'QR_READY' && globalWaData.qr ? (
               <div className="bg-white p-4 rounded-xl mb-6 shadow-lg shadow-white/5">
                 <img src={globalWaData.qr} alt="QR Code WhatsApp" className="w-64 h-64 object-contain mx-auto" />
+              </div>
+            ) : globalWaData.status === 'DISCONNECTED' ? (
+              <div className="flex flex-col items-center justify-center h-48 mb-6 bg-white/5 rounded-xl w-full border border-white/5">
+                <button 
+                  onClick={() => {
+                    setGlobalWaData({ status: 'STARTING', qr: null });
+                    const token = localStorage.getItem('sdr_jwt_token');
+                    fetch('/api/whatsapp/reconnect', { method: 'POST', headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+                  }}
+                  className="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded-xl text-white font-bold transition-colors"
+                >
+                  Gerar QR Code
+                </button>
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center h-48 mb-6 bg-white/5 rounded-xl w-full border border-white/5">
@@ -830,6 +847,12 @@ function SdrCampaign() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [aiTone, setAiTone] = useState('consultivo');
 
+  const [showAiGenerator, setShowAiGenerator] = useState(false);
+  const [aiModelMessage, setAiModelMessage] = useState('');
+  const [aiVibe, setAiVibe] = useState('');
+  const [aiCount, setAiCount] = useState(10);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+
   const [showBatchForm, setShowBatchForm] = useState(false);
   const [batchNiche, setBatchNiche] = useState('');
   const [batchCount, setBatchCount] = useState(16);
@@ -869,6 +892,36 @@ function SdrCampaign() {
       alert("Erro ao conectar com o servidor.");
     }
     setIsGeneratingBatch(false);
+  };
+
+  const handleGenerateVariations = async () => {
+    if (!aiModelMessage.trim()) return alert("Insira uma mensagem modelo.");
+    setIsGeneratingAi(true);
+    try {
+      const res = await fetch('/api/whatsapp/campaign/generate-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelMessage: aiModelMessage, vibe: aiVibe, count: aiCount })
+      });
+      const data = await res.json();
+      if (data.templates) {
+        const novos = data.templates.map((txt, i) => ({
+          id: Date.now() + i,
+          name: `Variação IA ${i+1}`,
+          content: txt,
+          isActive: false
+        }));
+        saveTemplates([...templates, ...novos]);
+        alert(`Sucesso! ${data.templates.length} variações geradas como RASCUNHO.`);
+        setShowAiGenerator(false);
+        setAiModelMessage('');
+      } else {
+        alert(data.error || "Erro desconhecido");
+      }
+    } catch(e) {
+      alert("Erro ao conectar com servidor.");
+    }
+    setIsGeneratingAi(false);
   };
 
   const handleGenerateAI = async () => {
@@ -924,10 +977,11 @@ function SdrCampaign() {
 
   const startCampaign = async () => {
     const selected = leads.filter(l => selectedLeads.has(l.id) && l.whatsapp && String(l.whatsapp).replace(/\D/g, '').length > 5);
-    const tpls = templates.map(t => t.content || t.text).filter(Boolean);
+    const activeTemplates = templates.filter(t => t.isActive !== false);
+    const tpls = activeTemplates.map(t => t.content || t.text).filter(Boolean);
     if (!selected.length) return alert('Selecione pelo menos um lead.');
-    if (!tpls.length) return alert('Crie pelo menos um template.');
-    if (!window.confirm(`Iniciar campanha para ${selected.length} leads com ${templates.length} templates?\n\nDelay: ${settings.delayMin}-${settings.delayMax}s\nLote: ${settings.batchSize} mensagens\nPausa entre lotes: ${Math.floor(settings.batchPause/60)} min`)) return;
+    if (!tpls.length) return alert('Ative pelo menos um template para iniciar.');
+    if (!window.confirm(`Iniciar campanha para ${selected.length} leads com ${activeTemplates.length} templates?\n\nDelay: ${settings.delayMin}-${settings.delayMax}s\nLote: ${settings.batchSize} mensagens\nPausa entre lotes: ${Math.floor(settings.batchPause/60)} min`)) return;
 
     try {
       const res = await fetch('/api/whatsapp/campaign/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ leads: selected, templates: tpls, ...settings }) });
@@ -1019,13 +1073,19 @@ function SdrCampaign() {
                 </button>
               )}
               <button 
-                onClick={() => { setShowBatchForm(!showBatchForm); setShowNewForm(false); }} 
+                onClick={() => { setShowBatchForm(!showBatchForm); setShowNewForm(false); setShowAiGenerator(false); }} 
                 className="px-3 py-1.5 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-lg text-sm font-bold hover:bg-purple-500 hover:text-white transition-colors flex items-center gap-1.5 shadow-[0_0_10px_rgba(168,85,247,0.1)]"
               >
                 <Bot size={14} /> Gerar em Massa (IA)
               </button>
               <button 
-                onClick={() => { setShowNewForm(!showNewForm); setShowBatchForm(false); }} 
+                onClick={() => { setShowAiGenerator(!showAiGenerator); setShowBatchForm(false); setShowNewForm(false); }} 
+                className="px-3 py-1.5 bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 rounded-lg text-sm font-bold hover:bg-indigo-500 hover:text-white transition-colors flex items-center gap-1.5 shadow-[0_0_10px_rgba(99,102,241,0.1)]"
+              >
+                <Bot size={14} /> Variações (IA)
+              </button>
+              <button 
+                onClick={() => { setShowNewForm(!showNewForm); setShowBatchForm(false); setShowAiGenerator(false); }} 
                 className="px-3 py-1.5 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-lg text-sm font-bold hover:bg-blue-500 hover:text-white transition-colors flex items-center gap-1"
               >
                 <Plus size={14} /> Novo
@@ -1134,8 +1194,28 @@ function SdrCampaign() {
             </div>
           )}
 
+          {showAiGenerator && (
+            <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-xl p-4 mb-4 space-y-3 shadow-[0_0_15px_rgba(99,102,241,0.05)]">
+              <div className="flex items-center gap-2 text-indigo-400 mb-2">
+                <Bot size={18} /> <h4 className="font-bold">Gerador de Variações B2B</h4>
+              </div>
+              <textarea value={aiModelMessage} onChange={e => setAiModelMessage(e.target.value)} rows={3} placeholder="Sua mensagem modelo..." className="w-full bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 resize-none" />
+              <input value={aiVibe} onChange={e => setAiVibe(e.target.value)} placeholder="Direcionamento/Vibe (ex: gere curiosidade sobre delivery)" className="w-full bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500" />
+              <div className="flex gap-4 items-center">
+                <label className="text-sm text-gray-400">Quantidade:</label>
+                <input type="number" min="1" max="20" value={aiCount} onChange={e => setAiCount(e.target.value)} className="w-20 bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-1 text-sm text-white focus:outline-none focus:border-indigo-500" />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button onClick={handleGenerateVariations} disabled={isGeneratingAi} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-bold flex items-center gap-2 transition-colors">
+                  {isGeneratingAi ? <><Loader2 size={16} className="animate-spin" /> Gerando...</> : <><Sparkles size={16} /> Gerar Variações</>}
+                </button>
+                <button onClick={() => setShowAiGenerator(false)} className="px-4 py-2 bg-white/5 text-gray-400 rounded-lg text-sm hover:bg-white/10 transition-colors">Cancelar</button>
+              </div>
+            </div>
+          )}
+
           {showNewForm && (
-            <div className="bg-white/5 border border-blue-500/30 rounded-xl p-4 space-y-3">
+            <div className="bg-white/5 border border-blue-500/30 rounded-xl p-4 mb-4 space-y-3">
               <div className="flex gap-2 mb-2 p-3 bg-purple-500/10 rounded-lg border border-purple-500/20 items-end">
                 <div className="flex-1">
                   <label className="text-xs text-purple-300 font-bold mb-1 block">🪄 Gerador com Inteligência Artificial</label>
@@ -1176,7 +1256,15 @@ function SdrCampaign() {
               ) : (
                 <>
                   <div className="flex items-center justify-between mb-2">
-                    <h4 className="font-bold text-white text-sm">{t.name}</h4>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => saveTemplates(templates.map(x => x.id === t.id ? {...x, isActive: x.isActive === false ? true : false} : x))} className={`w-9 h-5 rounded-full relative transition-colors shrink-0 ${t.isActive !== false ? 'bg-emerald-500' : 'bg-gray-600'}`}>
+                        <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${t.isActive !== false ? 'translate-x-4' : ''}`} />
+                      </button>
+                      <h4 className="font-bold text-white text-sm break-all">{t.name}</h4>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full uppercase tracking-wider shrink-0 ${t.isActive !== false ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                        {t.isActive !== false ? 'Ativo' : 'Rascunho'}
+                      </span>
+                    </div>
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button onClick={() => { setEditingId(t.id); setEditName(t.name); setEditText(t.content || t.text); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-blue-500 transition-colors"><PenLine size={12} /></button>
                       <button onClick={() => { navigator.clipboard.writeText(t.content || t.text); }} className="p-1.5 bg-white/10 rounded-lg hover:bg-blue-500 transition-colors"><Copy size={12} /></button>
@@ -1497,7 +1585,7 @@ function SdrScanner() {
     setError('');
     setResults(null);
     try {
-      const res = await fetch(`http://localhost:3001/api/scrape?query=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}&limit=${limit}`);
+      const res = await fetch(`/api/scrape?query=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}&limit=${limit}`);
       const data = await res.json();
       if (data.error) setError(data.error);
       else setResults(data.data);

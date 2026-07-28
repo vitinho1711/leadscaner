@@ -6,13 +6,28 @@ export default function LeadScannerSettings() {
   const [waData, setWaData] = useState({ status: 'LOADING', qr: null });
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [apiConfig, setApiConfig] = useState({ groqApiKey: '', enableAutoResponder: true });
+  const [userName, setUserName] = useState('');
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   useEffect(() => {
-    fetch('/api/config').then(r => r.json()).then(setApiConfig).catch(()=>{});
+    const token = localStorage.getItem('sdr_jwt_token');
+    const userStr = localStorage.getItem('sdr_user');
+    if (userStr) {
+      try {
+        const u = JSON.parse(userStr.startsWith('{') ? userStr : atob(userStr));
+        setUserName(u.username || '');
+      } catch (e) {}
+    }
+    
+    fetch('/api/config', {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    }).then(r => r.json()).then(setApiConfig).catch(()=>{});
     const checkWa = async () => {
       try {
-        const res = await fetch('/api/whatsapp/status');
+        const token = localStorage.getItem('sdr_jwt_token');
+        const res = await fetch('/api/whatsapp/status', {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
         if (res.ok) setWaData(await res.json());
       } catch (e) {}
     };
@@ -24,12 +39,36 @@ export default function LeadScannerSettings() {
   const handleSaveConfig = async () => {
     setIsSavingConfig(true);
     try {
+      const token = localStorage.getItem('sdr_jwt_token');
+      
+      // Save profile name
+      if (userName) {
+        await fetch('/api/user/profile', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({ username: userName })
+        });
+        const userStr = localStorage.getItem('sdr_user');
+        if (userStr) {
+          const u = JSON.parse(userStr.startsWith('{') ? userStr : atob(userStr));
+          u.username = userName;
+          localStorage.setItem('sdr_user', btoa(JSON.stringify(u)));
+          window.dispatchEvent(new Event('storage')); // trigger header update if needed
+        }
+      }
+
       await fetch('/api/config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
         body: JSON.stringify({ groqApiKey: apiConfig.groqApiKey, autoResponder: apiConfig.enableAutoResponder })
       });
-      alert('Configurações salvas com sucesso!');
+      alert('Configurações salvas com sucesso! (Recarregue a página se o seu nome não atualizar no topo)');
     } catch(e) {
       alert('Erro ao salvar.');
     }
@@ -38,12 +77,30 @@ export default function LeadScannerSettings() {
 
   const handleReconnect = async () => {
     setIsReconnecting(true);
+    setWaData(prev => ({ ...prev, status: 'STARTING', qr: null }));
     try {
-      await fetch('/api/whatsapp/reconnect', { method: 'POST' });
+      const token = localStorage.getItem('sdr_jwt_token');
+      await fetch('/api/whatsapp/reconnect', { 
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
     } catch (e) {
       alert('Erro ao tentar reconectar.');
     }
     setTimeout(() => setIsReconnecting(false), 2000);
+  };
+
+  const handleDisconnect = async () => {
+    setIsReconnecting(true);
+    setWaData({ status: 'DISCONNECTED', qr: null });
+    try {
+      const token = localStorage.getItem('sdr_jwt_token');
+      await fetch('/api/whatsapp/disconnect', { 
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+    } catch (e) {}
+    setIsReconnecting(false);
   };
 
   return (
@@ -105,7 +162,7 @@ export default function LeadScannerSettings() {
                     <h4 className="text-xl font-bold text-white mb-1">WhatsApp Conectado</h4>
                     <p className="text-sm text-gray-400 mb-6">O sistema está pronto para disparar campanhas.</p>
                     
-                    <button onClick={handleReconnect} disabled={isReconnecting} className="px-6 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-sm font-bold transition-colors flex items-center gap-2">
+                    <button onClick={handleDisconnect} disabled={isReconnecting} className="px-6 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-sm font-bold transition-colors flex items-center gap-2">
                       <LogOut size={16} /> Desconectar / Trocar de Número
                     </button>
                   </div>
@@ -118,6 +175,15 @@ export default function LeadScannerSettings() {
                     </div>
                     <button onClick={handleReconnect} disabled={isReconnecting} className="px-6 py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 rounded-lg text-sm font-bold transition-colors flex items-center gap-2">
                       <RefreshCcw size={16} className={isReconnecting ? "animate-spin" : ""} /> Gerar Novo Código
+                    </button>
+                  </div>
+                ) : waData.status === 'DISCONNECTED' ? (
+                  <div className="flex flex-col items-center py-10">
+                    <LogOut size={32} className="text-gray-600 mb-4" />
+                    <h4 className="text-lg font-bold text-white mb-1">WhatsApp Desconectado</h4>
+                    <p className="text-sm text-gray-500 mb-6">Você não está conectado. Clique abaixo para gerar o QR Code.</p>
+                    <button onClick={handleReconnect} disabled={isReconnecting} className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-bold transition-colors">
+                      {isReconnecting ? 'Iniciando...' : 'Conectar / Gerar Código'}
                     </button>
                   </div>
                 ) : (
@@ -139,7 +205,9 @@ export default function LeadScannerSettings() {
             <div className="bg-[#121216] border border-white/5 rounded-2xl p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-bold flex items-center gap-2"><Bot size={20} className="text-purple-400" /> Critérios Globais da IA</h3>
-                <button className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 rounded-lg text-xs font-bold transition-colors shadow-lg">Salvar</button>
+                <button onClick={handleSaveConfig} disabled={isSavingConfig} className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 rounded-lg text-xs font-bold transition-colors shadow-lg">
+                  {isSavingConfig ? 'Salvando...' : 'Salvar'}
+                </button>
               </div>
               <p className="text-sm text-gray-400 mb-6">Defina regras que a IA usará em todas as suas análises para reprovar leads automaticamente.</p>
               
@@ -179,7 +247,25 @@ export default function LeadScannerSettings() {
           {/* Aba Outros */}
           {activeTab === 'outros' && (
             <div className="bg-[#121216] border border-white/5 rounded-2xl p-6 space-y-6">
+              
               <div>
+                <h3 className="text-lg font-bold mb-4 text-white flex items-center gap-2">Perfil</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-bold text-gray-400 mb-2">Seu Nome</label>
+                    <input 
+                      type="text" 
+                      value={userName} 
+                      onChange={e => setUserName(e.target.value)}
+                      placeholder="Ex: Vitor Batista" 
+                      className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+                    />
+                    <p className="text-xs text-gray-500 mt-2">Nome usado para identificação dentro do sistema e nas mensagens.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-white/10 pt-6">
                 <h3 className="text-lg font-bold mb-4 text-white flex items-center gap-2"><Key size={20} className="text-purple-400" /> Inteligência Artificial</h3>
                 <p className="text-sm text-gray-400 mb-6">Configure a IA para gerar abordagens e conversar com seus leads automaticamente.</p>
                 

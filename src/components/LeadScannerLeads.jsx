@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Download, Copy, Zap, Search, Filter, PhoneCall, TrendingUp, CheckCircle, Flame, MessageSquare, Target, HeadphonesIcon, RefreshCw, Trash2, CheckSquare, Square, XCircle, Megaphone } from 'lucide-react';
 
-export default function LeadScannerLeads({ setActiveTab }) {
+export default function LeadScannerLeads({ setActiveTab, userTier }) {
   const [activeFilter, setActiveFilter] = useState('Todos');
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +40,21 @@ export default function LeadScannerLeads({ setActiveTab }) {
     }
     setSelectedIds(new Set());
     fetchLeads();
+  };
+
+  const handleStatusChange = async (leadId, newStatus) => {
+    // Optimistic update
+    setLeads(leads.map(l => l.id === leadId ? { ...l, status: newStatus } : l));
+    try {
+      await fetch(`/api/leads/${leadId}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus })
+      });
+    } catch (e) {
+      console.error(e);
+      alert('Erro de conexão ao atualizar status.');
+    }
   };
 
   const handleDeleteAll = async () => {
@@ -107,8 +122,9 @@ export default function LeadScannerLeads({ setActiveTab }) {
       if(activeFilter === '🔥 Quentes') return l.score >= 20 || l.status === 'QUENTE';
       if(activeFilter === 'Novos') return l.status === 'NOVO' || l.status === 'FRIO';
       if(activeFilter === 'Chamados') return l.status === 'CHAMADO' || l.messageSent;
+      if(activeFilter === 'Respondidos') return l.status === 'RESPONDIDO';
       if(activeFilter === 'Negociando') return l.status === 'NEGOCIANDO';
-      if(activeFilter === 'Fechados') return l.status === 'FECHADO';
+      if(activeFilter === 'Fechados') return l.status === 'FECHADO' || l.status === 'VENDIDO' || l.status === 'CONVERTIDO';
       return true;
     })();
     const matchSearch = !searchTerm || (l.nome || '').toLowerCase().includes(searchTerm.toLowerCase()) || (l.nicho || '').toLowerCase().includes(searchTerm.toLowerCase());
@@ -120,8 +136,9 @@ export default function LeadScannerLeads({ setActiveTab }) {
     const s = status.toUpperCase();
     if(s === 'NOVO' || s === 'FRIO') return 'blue';
     if(s === 'MORNO' || s === 'CHAMADO') return 'orange';
+    if(s === 'RESPONDIDO') return 'yellow';
     if(s === 'QUENTE' || s === 'NEGOCIANDO') return 'purple';
-    if(s === 'FECHADO') return 'emerald';
+    if(s === 'FECHADO' || s === 'VENDIDO' || s === 'CONVERTIDO') return 'emerald';
     return 'gray';
   };
 
@@ -135,8 +152,9 @@ export default function LeadScannerLeads({ setActiveTab }) {
   const stats = {
     novos: leads.filter(l => !l.status || l.status === 'NOVO' || l.status === 'FRIO').length,
     chamados: leads.filter(l => l.status === 'CHAMADO' || l.messageSent).length,
+    respondidos: leads.filter(l => l.status === 'RESPONDIDO').length,
     negociando: leads.filter(l => l.status === 'NEGOCIANDO').length,
-    fechados: leads.filter(l => l.status === 'FECHADO').length
+    fechados: leads.filter(l => l.status === 'FECHADO' || l.status === 'VENDIDO' || l.status === 'CONVERTIDO').length
   };
 
   return (
@@ -155,7 +173,16 @@ export default function LeadScannerLeads({ setActiveTab }) {
           </button>
           {selectedIds.size > 0 && (
             <>
-              <button onClick={handleSendToCampaign} className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500 hover:text-white rounded-lg text-sm font-bold transition-colors shadow-[0_0_15px_rgba(16,185,129,0.2)]">
+              <button 
+                onClick={() => {
+                  if (userTier === 'basic') {
+                    alert('⭐ Funcionalidade Exclusiva PRO!\n\nNo seu plano atual você só pode enviar mensagens manualmente. Faça o upgrade para enviar Campanhas Automáticas em massa!');
+                  } else {
+                    handleSendToCampaign();
+                  }
+                }} 
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500 hover:text-white rounded-lg text-sm font-bold transition-colors shadow-[0_0_15px_rgba(16,185,129,0.2)]"
+              >
                 <Megaphone size={16} /> Enviar para Campanha Automática
               </button>
               <button onClick={handleDeleteSelected} className="flex items-center gap-2 px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500 hover:text-white rounded-lg text-sm font-bold transition-colors">
@@ -173,7 +200,7 @@ export default function LeadScannerLeads({ setActiveTab }) {
       </div>
 
       {/* Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         <div className="bg-[#121216] border border-white/5 rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-start gap-3 mb-2">
             <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20"><Zap size={20} /></div>
@@ -194,6 +221,12 @@ export default function LeadScannerLeads({ setActiveTab }) {
         </div>
         <div className="bg-[#121216] border border-white/5 rounded-xl p-5 flex flex-col justify-between">
           <div className="flex items-start gap-3 mb-2">
+            <div className="p-2 rounded-lg bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"><Zap size={20} /></div>
+            <div><p className="text-xs text-gray-400 font-medium">Respondidos</p><h3 className="text-2xl font-bold mt-0.5">{stats.respondidos}</h3></div>
+          </div>
+        </div>
+        <div className="bg-[#121216] border border-white/5 rounded-xl p-5 flex flex-col justify-between">
+          <div className="flex items-start gap-3 mb-2">
             <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><CheckCircle size={20} /></div>
             <div><p className="text-xs text-gray-400 font-medium">Leads Fechados</p><h3 className="text-2xl font-bold mt-0.5">{stats.fechados}</h3></div>
           </div>
@@ -208,7 +241,7 @@ export default function LeadScannerLeads({ setActiveTab }) {
           {/* Filters & Search */}
           <div className="flex items-center justify-between bg-[#121216] p-3 border border-white/5 rounded-xl overflow-x-auto scrollbar-none flex-wrap gap-2">
             <div className="flex items-center gap-2 whitespace-nowrap">
-              {['Todos', '🔥 Quentes', 'Novos', 'Chamados', 'Negociando', 'Fechados'].map(filter => (
+              {['Todos', '🔥 Quentes', 'Novos', 'Chamados', 'Respondidos', 'Negociando', 'Fechados'].map(filter => (
                 <button 
                   key={filter}
                   onClick={() => { setActiveFilter(filter); setSelectedIds(new Set()); }}
@@ -247,6 +280,7 @@ export default function LeadScannerLeads({ setActiveTab }) {
                     <th className="py-4 px-4 font-medium">Lead</th>
                     <th className="py-4 px-4 font-medium">Status</th>
                     <th className="py-4 px-4 font-medium">WhatsApp</th>
+                    <th className="py-4 px-4 font-medium text-center">E-mail / Instagram</th>
                     <th className="py-4 px-4 font-medium">Nível / Pontos</th>
                     <th className="py-4 px-4 font-medium text-right">Ações</th>
                   </tr>
@@ -283,9 +317,18 @@ export default function LeadScannerLeads({ setActiveTab }) {
                           </div>
                         </td>
                         <td className="py-4 px-4">
-                          <span className={`px-2.5 py-1 rounded-md text-[10px] font-bold border bg-${statusColor}-500/10 text-${statusColor}-400 border-${statusColor}-500/20`}>
-                            {lead.status || 'NOVO'}
-                          </span>
+                          <select 
+                            value={lead.status || 'NOVO'}
+                            onChange={(e) => handleStatusChange(lead.id, e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`px-2.5 py-1 rounded-md text-[10px] font-bold border bg-${statusColor}-500/10 text-${statusColor}-400 border-${statusColor}-500/20 outline-none cursor-pointer appearance-none text-center`}
+                          >
+                            <option value="NOVO" className="bg-[#121216] text-blue-400">NOVO</option>
+                            <option value="CHAMADO" className="bg-[#121216] text-orange-400">CHAMADO</option>
+                            <option value="RESPONDIDO" className="bg-[#121216] text-yellow-400">RESPONDIDO</option>
+                            <option value="NEGOCIANDO" className="bg-[#121216] text-purple-400">NEGOCIANDO</option>
+                            <option value="FECHADO" className="bg-[#121216] text-emerald-400">FECHADO</option>
+                          </select>
                         </td>
                         <td className="py-4 px-4">
                           {cleanPhone.length >= 10 ? (
@@ -295,6 +338,24 @@ export default function LeadScannerLeads({ setActiveTab }) {
                           ) : (
                             <span className="text-gray-600 text-[10px]">Sem número</span>
                           )}
+                        </td>
+                        <td className="py-4 px-4">
+                          <div className="flex flex-col gap-1.5">
+                            {lead.email ? (
+                              <button onClick={(e) => { e.stopPropagation(); window.open(`mailto:${lead.email}`, '_blank'); }} className="flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 w-max" title="Enviar E-mail">
+                                ✉️ {lead.email.length > 20 ? lead.email.substring(0,20)+'...' : lead.email}
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-gray-600">Sem e-mail</span>
+                            )}
+                            {lead.instagram ? (
+                              <button onClick={(e) => { e.stopPropagation(); window.open(`https://instagram.com/${lead.instagram}`, '_blank'); }} className="flex items-center gap-1 text-[10px] text-pink-400 hover:text-pink-300 w-max" title="Abrir Instagram">
+                                📸 @{lead.instagram}
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-gray-600">Sem instagram</span>
+                            )}
+                          </div>
                         </td>
                         <td className="py-4 px-4">
                           <div className="flex flex-col gap-1">
