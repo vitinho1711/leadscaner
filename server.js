@@ -3042,7 +3042,8 @@ app.post('/api/ai/generate-template', checkTrialActive, checkProTier, async (req
   try {
     const { tone } = req.body;
     const config = getUserConfig(req.user.id);
-    if (!config.groqApiKey) return res.status(400).json({ error: 'Chave da API não configurada.' });
+    const hasAiKey = Boolean(config.geminiApiKey || config.groqApiKey || config.openaiApiKey || process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY);
+    if (!hasAiKey) return res.status(400).json({ error: 'Chave da API não configurada. Configure sua chave OpenAI, Gemini ou Groq em Configurações.' });
 
     let prompt = `Você é um SDR Especialista de alta conversão. Crie UMA ÚNICA mensagem curta de abordagem fria para B2B no WhatsApp.
 Use variáveis: {saudacao}, {nome}, {empresa}, {nicho}, {cidade}.
@@ -3205,13 +3206,17 @@ app.post('/api/chat', checkTrialActive, async (req, res) => {
   try {
     const { message, history, leadInfo } = req.body;
     const config = getUserConfig(req.user.id);
-    if (!config.groqApiKey) return res.status(400).json({ error: 'Chave da API não configurada.' });
+    const hasAiKey = Boolean(config.geminiApiKey || config.groqApiKey || config.openaiApiKey || process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY);
+    if (!hasAiKey) return res.status(400).json({ error: 'Chave da API não configurada. Configure sua chave em Configurações.' });
     
-    const openai = getOpenAIInstance(req.user.id);
-    const completion = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "system", content: `Você é um SDR. Informações: ${JSON.stringify(leadInfo)}` }, ...history, { role: "user", content: message }],
-      temperature: 0.7, max_tokens: 150,
+    const completion = await createAiCompletion(req.user.id, {
+      messages: [
+        { role: "system", content: `Você é um SDR Especialista em vendas B2B via WhatsApp. Informações do cliente: ${JSON.stringify(leadInfo || {})}` },
+        ...(history || []),
+        { role: "user", content: message }
+      ],
+      temperature: 0.7,
+      max_tokens: 300
     });
     res.json({ reply: completion.choices[0].message.content });
   } catch (error) { res.status(500).json({ error: error.message }); }
