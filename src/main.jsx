@@ -40,13 +40,13 @@ window.fetch = async function (resource, config) {
     }
   }
 
-  // If Vercel returns 502 Bad Gateway or 504 Gateway Timeout on /api calls, retry directly on Render
-  if (response && (response.status === 502 || response.status === 504) && typeof resource === 'string' && resource.startsWith('/api/')) {
+  // If Vercel returns 429 Too Many Requests, 502 Bad Gateway, 503 or 504 Gateway Timeout, retry directly on Render
+  if (response && [429, 502, 503, 504].includes(response.status) && typeof resource === 'string' && resource.startsWith('/api/')) {
     try {
-      console.warn(`[Vercel Gateway Timeout ${response.status}] Tentando reconectar direto no Render: ${resource}...`);
+      console.warn(`[Proxy Fallback ${response.status}] Tentando reconectar direto no Render: ${resource}...`);
       const directUrl = `${BACKEND_RENDER_URL}${resource}`;
       const retryResponse = await originalFetch(directUrl, config);
-      if (retryResponse.ok || retryResponse.status < 500) {
+      if (retryResponse.ok || retryResponse.status < 400) {
         return retryResponse;
       }
     } catch (e) {

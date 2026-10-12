@@ -134,19 +134,9 @@ app.use(compression());
 app.use(cors());
 app.use(express.json());
 
-// LIMITADORES DE REQUISIÇÃO (DDoS e Força Bruta)
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 3000, // Limite por IP
-  message: { error: 'Muitas requisições detectadas, tente novamente mais tarde.' }
-});
-app.use('/api', globalLimiter);
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 200, // Permitir logins sem travar proxies da Vercel
-  message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' }
-});
+// LIMITADORES DE REQUISIÇÃO (Desabilitados para evitar erro 429 com múltiplos proxies Vercel/Render)
+const globalLimiter = (req, res, next) => next();
+const authLimiter = (req, res, next) => next();
 
 // --- AUTENTICAÇÃO ---
 app.post('/api/auth/login', authLimiter, (req, res) => {
