@@ -1,0 +1,27 @@
+.git
+.vercel
+node_modules
+.sdr_wwebjs_auth
+.sdr_wwebjs_auth/**
+.wwebjs_auth
+.wwebjs_auth/**
+.wwebjs_cache
+.wwebjs_cache/**
+criativos leadscaners
+criativos leadscaners/**
+data
+data/**
+dist
+dist-ssr
+*.log
+*.mp4
+*.mp3
+*.webm
+*.zip
+*.tar.gz
+leads*.json
+users.json
+history.json
+campaign_templates.json
+invites.json
+scratch*

@@ -54,9 +54,9 @@ export default function LeadScannerDashboard({ setActiveTab, planInfo }) {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const token = localStorage.getItem('token');
+        const token = localStorage.getItem('sdr_jwt_token') || localStorage.getItem('token');
         const resLeads = await fetch('/api/leads', {
-          headers: { 'Authorization': `Bearer ${token}` }
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         const jsonLeads = await resLeads.json();
         setLeads(jsonLeads.data || []);

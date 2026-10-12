@@ -88,18 +88,57 @@ function App() {
     e.preventDefault();
     setError('');
     try {
-      const endpoint = '/api/auth/login';
-      const body = loginMode === 'code' 
-        ? { accessCode } 
-        : { username, password };
+      const cleanCode = accessCode.trim().toUpperCase();
+      let res;
+      let data;
 
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json();
-      if (data.success) {
+      if (loginMode === 'code') {
+        // Tenta primeiro o login direto com o código de acesso
+        res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accessCode: cleanCode })
+        });
+        data = await res.json();
+
+        // Se o backend retornou código inválido e é um código LEAD-, tenta registrar o convite automaticamente!
+        if (!data.success && cleanCode.startsWith('LEAD-')) {
+          const autoUsername = `user_${cleanCode.replace(/[^A-Z0-9]/g, '').slice(-4).toLowerCase()}`;
+          const regRes = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: autoUsername,
+              password: '123',
+              inviteCode: cleanCode
+            })
+          });
+          const regData = await regRes.json();
+          if (regData.success) {
+            data = regData;
+          } else {
+            // Se o usuário já existia com essa credencial padrão, tenta logar
+            const loginRetry = await fetch('/api/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ username: autoUsername, password: '123' })
+            });
+            const retryData = await loginRetry.json();
+            if (retryData.success) {
+              data = retryData;
+            }
+          }
+        }
+      } else {
+        res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        data = await res.json();
+      }
+
+      if (data && data.success) {
         localStorage.setItem('sdr_jwt_token', data.token);
         localStorage.setItem('token', data.token);
         localStorage.setItem('sdr_user', btoa(JSON.stringify(data.user)));
@@ -110,7 +149,7 @@ function App() {
           window.history.replaceState({}, '', window.location.pathname);
         }
       } else {
-        setError(data.error || 'Erro ao fazer login');
+        setError(data?.error || 'Erro ao fazer login. Verifique o código de convite.');
       }
     } catch (err) {
       setError('Erro de conexão com o servidor');

@@ -113,7 +113,7 @@ export default function LeadScannerMessages({ planInfo, userTier }) {
   };
 
   const handleAiGenerate = () => {
-    const aiText = 'Olá {nome}! Percebi que a {empresa} é super conceituada na área de {nicho}. Estou entrando em contato porque nossa IA tem ajudado empresas como a sua a escalar as vendas pelo WhatsApp automaticamente.\n\nFaz sentido conversarmos por 5 minutos?';
+    const aiText = 'Olá, {nome}! Tudo bem? Aqui é o Vitor.\n\nEstava analisando o trabalho de destaque da {empresa} em {cidade} e preparei uma sugestão exclusiva de site moderno para vocês, focada em atrair mais orçamentos pelo WhatsApp.\n\nPosso te mandar o link da demonstração para você dar uma olhada sem compromisso?';
     if (isEditing) {
       setEditForm({...editForm, content: aiText});
     } else {
@@ -281,7 +281,7 @@ export default function LeadScannerMessages({ planInfo, userTier }) {
                 <Shuffle size={12} /> Quantidade de Validações (Mensagens Únicas)
               </label>
               <div className="flex gap-2">
-                {[10, 16, 20, 50].map(c => (
+                {[10, 25, 50, 100].map(c => (
                   <button
                     key={c}
                     type="button"
@@ -298,14 +298,14 @@ export default function LeadScannerMessages({ planInfo, userTier }) {
                 <input 
                   type="number" 
                   value={batchCount} 
-                  onChange={e => setBatchCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} 
+                  onChange={e => setBatchCount(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))} 
                   className="bg-black/40 border border-emerald-500/20 rounded-xl px-3 text-center text-sm text-white focus:outline-none focus:border-emerald-500/50 transition-colors" 
                   style={{ width: '70px' }}
                   min={1}
-                  max={50}
+                  max={100}
                 />
               </div>
-              <p className="text-[10px] text-gray-500 mt-1.5">Máximo: 50 variações por geração</p>
+              <p className="text-[10px] text-gray-500 mt-1.5">Máximo: 100 variações por geração</p>
             </div>
           </div>
 

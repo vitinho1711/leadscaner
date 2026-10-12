@@ -1,5 +1,4 @@
 {
-  "name": "lead-scanner-mvp",
   "framework": "vite",
   "rewrites": [
     {

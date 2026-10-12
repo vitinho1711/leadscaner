@@ -99,7 +99,7 @@ export default function LeadScannerHistory() {
         <div className="p-4 border-b border-white/5 flex items-center justify-between bg-black/20">
           <div className="flex items-center gap-3">
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={14} />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" size={14} />
               <input 
                 type="text" 
                 value={searchTerm}

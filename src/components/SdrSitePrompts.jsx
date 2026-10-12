@@ -30,8 +30,8 @@ export default function SdrSiteGenerator() {
   const fetchLeads = async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('token');
-      const res = await fetch('/api/leads', { headers: { Authorization: `Bearer ${token}` } });
+      const token = localStorage.getItem('sdr_jwt_token') || localStorage.getItem('token');
+      const res = await fetch('/api/leads', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       const json = await res.json();
       if (json.data) setLeads(json.data.reverse());
     } catch (e) { console.error(e); }
@@ -56,10 +56,13 @@ export default function SdrSiteGenerator() {
     startLoadingSteps();
 
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('sdr_jwt_token') || localStorage.getItem('token');
       const res = await fetch('/api/generate-site', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 
+          'Content-Type': 'application/json', 
+          ...(token ? { Authorization: `Bearer ${token}` } : {}) 
+        },
         body: JSON.stringify({ leadId: lead.id }),
       });
       const json = await res.json();
@@ -131,13 +134,13 @@ export default function SdrSiteGenerator() {
             </p>
           </div>
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={15} />
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" size={16} />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Buscar por nome, nicho ou cidade..."
-              className="w-full md:w-72 pl-9 pr-4 py-2.5 bg-black/50 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-purple-500/50 text-white placeholder-gray-500 transition-colors"
+              className="w-full md:w-72 pl-10 pr-4 py-2.5 bg-black/50 border border-white/10 rounded-xl text-sm focus:outline-none focus:border-purple-500/50 text-white placeholder-gray-500 transition-colors"
             />
           </div>
         </div>
