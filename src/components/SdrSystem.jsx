@@ -35,6 +35,7 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
 
   // Global WA Fetch
   useEffect(() => {
+    let timeoutId;
     const fetchWa = async () => {
       try {
         const token = localStorage.getItem('sdr_jwt_token');
@@ -51,7 +52,6 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
             setDismissWa(true);
           }
         } else if (res.status === 401) {
-          // If unauthorized, don't trigger the modal error state yet
           setGlobalWaData(prev => prev?.status === 'CONNECTING' ? prev : { status: 'CONNECTING', qr: null });
         } else {
           setGlobalWaData(prev => prev?.status === 'DISCONNECTED' ? prev : { status: 'DISCONNECTED', qr: null });
@@ -59,11 +59,14 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
       } catch(e) {
         setGlobalWaData(prev => prev?.status === 'DISCONNECTED' ? prev : { status: 'DISCONNECTED', qr: null });
       }
+
+      const pollDelay = (globalWaData?.status === 'STARTING' || globalWaData?.status === 'CONNECTING') ? 2000 : 4500;
+      timeoutId = setTimeout(fetchWa, pollDelay);
     };
+
     fetchWa();
-    const interval = setInterval(fetchWa, 6000);
-    return () => clearInterval(interval);
-  }, []);
+    return () => clearTimeout(timeoutId);
+  }, [globalWaData?.status]);
 
   return (
     <div className="sdr-system flex h-full bg-[#0a0a0a] text-white overflow-hidden" style={{fontFamily: 'Inter, sans-serif'}}>
@@ -252,8 +255,36 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
             <p className="text-gray-400 mb-8 text-sm">O Agente SDR precisa estar conectado ao WhatsApp para enviar mensagens e operar campanhas automaticamente.</p>
             
             {globalWaData.status === 'QR_READY' && globalWaData.qr ? (
-              <div className="bg-white p-4 rounded-xl mb-6 shadow-lg shadow-white/5">
-                <img src={globalWaData.qr} alt="QR Code WhatsApp" className="w-64 h-64 object-contain mx-auto" />
+              <div className="space-y-4 mb-6">
+                <div className="bg-white p-4 rounded-xl shadow-xl shadow-white/5 border border-white/20">
+                  <img src={globalWaData.qr} alt="QR Code WhatsApp" className="w-64 h-64 object-contain mx-auto" />
+                </div>
+                <div className="w-full text-center p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                  <p className="text-sm font-bold text-emerald-400 flex items-center justify-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                    Aponte a câmera do WhatsApp para o código
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">Dispositivos conectados &gt; Conectar aparelho</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setGlobalWaData({ status: 'STARTING', qr: null });
+                    const token = localStorage.getItem('sdr_jwt_token');
+                    fetch('/api/whatsapp/reconnect', { method: 'POST', headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+                  }}
+                  className="text-xs text-gray-400 hover:text-white underline block mx-auto transition-colors"
+                >
+                  🔄 Gerar Novo QR Code
+                </button>
+              </div>
+            ) : (globalWaData.status === 'STARTING' || globalWaData.status === 'CONNECTING') ? (
+              <div className="flex flex-col items-center justify-center h-48 mb-6 bg-white/5 rounded-xl w-full border border-white/5 text-center p-4">
+                <RefreshCcw size={36} className="text-purple-400 animate-spin mb-3" />
+                <p className="text-white font-bold text-base">Iniciando WhatsApp...</p>
+                <p className="text-purple-300/80 text-xs mt-1">Carregando o WhatsApp Web. O QR Code aparecerá em aproximadamente 10 a 15 segundos.</p>
+                <div className="w-48 h-1 bg-white/10 rounded-full mx-auto mt-4 overflow-hidden">
+                  <div className="w-full h-full bg-gradient-to-r from-purple-500 to-emerald-400 animate-pulse"></div>
+                </div>
               </div>
             ) : globalWaData.status === 'DISCONNECTED' ? (
               <div className="flex flex-col items-center justify-center h-48 mb-6 bg-white/5 rounded-xl w-full border border-white/5">
@@ -263,7 +294,7 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
                     const token = localStorage.getItem('sdr_jwt_token');
                     fetch('/api/whatsapp/reconnect', { method: 'POST', headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
                   }}
-                  className="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded-xl text-white font-bold transition-colors"
+                  className="px-6 py-3 bg-purple-600 hover:bg-purple-500 rounded-xl text-white font-bold transition-colors shadow-[0_0_20px_rgba(168,85,247,0.3)]"
                 >
                   Gerar QR Code
                 </button>
@@ -272,15 +303,6 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
               <div className="flex flex-col items-center justify-center h-48 mb-6 bg-white/5 rounded-xl w-full border border-white/5">
                 <RefreshCcw size={32} className="text-gray-500 animate-spin mb-4" />
                 <p className="text-gray-500 text-sm">Iniciando conexão...</p>
-              </div>
-            )}
-            
-            {globalWaData.status === 'QR_READY' && (
-              <div className="w-full text-center p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 mb-6">
-                <p className="text-sm font-bold text-emerald-400">
-                  Aponte a câmera do WhatsApp para o código
-                </p>
-                <p className="text-xs text-gray-500 mt-1">Dispositivos conectados &gt; Conectar aparelho</p>
               </div>
             )}
 

@@ -56,6 +56,7 @@ export default function LeadScannerSettings() {
       })
       .catch(() => {});
 
+    let timeoutId;
     const checkWa = async () => {
       try {
         const token = localStorage.getItem('sdr_jwt_token');
@@ -64,11 +65,13 @@ export default function LeadScannerSettings() {
         });
         if (res.ok) setWaData(await res.json());
       } catch (e) {}
+
+      const pollDelay = (waData?.status === 'STARTING' || isReconnecting) ? 1500 : 3000;
+      timeoutId = setTimeout(checkWa, pollDelay);
     };
     checkWa();
-    const interval = setInterval(checkWa, 3000);
-    return () => clearInterval(interval);
-  }, []);
+    return () => clearTimeout(timeoutId);
+  }, [waData?.status, isReconnecting]);
 
   const handleSaveConfig = async () => {
     setIsSavingConfig(true);
@@ -546,18 +549,45 @@ export default function LeadScannerSettings() {
                   </div>
                 ) : waData.status === 'QR_READY' && waData.qr ? (
                   <div className="text-center space-y-4">
-                    <div className="bg-white p-4 rounded-2xl inline-block shadow-xl">
-                      <img src={waData.qr} alt="QR Code WhatsApp" className="w-64 h-64" />
+                    <div className="bg-white p-4 rounded-2xl inline-block shadow-2xl border border-white/20">
+                      <img src={waData.qr} alt="QR Code WhatsApp" className="w-64 h-64 mx-auto" />
                     </div>
                     <div>
-                      <p className="text-sm font-bold text-white">Escaneie o QR Code no seu WhatsApp</p>
+                      <p className="text-base font-bold text-white flex items-center justify-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                        Aponte a câmera do WhatsApp para o código
+                      </p>
                       <p className="text-xs text-gray-400 mt-1">Abra o WhatsApp &gt; Dispositivos Conectados &gt; Conectar um aparelho.</p>
+                    </div>
+                    <div className="pt-2">
+                      <button
+                        onClick={handleReconnect}
+                        disabled={isReconnecting}
+                        className="px-4 py-2 text-xs font-bold text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-all"
+                      >
+                        🔄 Gerar Novo QR Code
+                      </button>
+                    </div>
+                  </div>
+                ) : (waData.status === 'STARTING' || isReconnecting) ? (
+                  <div className="text-center space-y-4 py-6">
+                    <div className="w-16 h-16 bg-purple-500/10 rounded-full flex items-center justify-center mx-auto border border-purple-500/20 text-purple-400">
+                      <RefreshCcw size={28} className="animate-spin text-purple-400" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-lg text-white">Iniciando WhatsApp...</h4>
+                      <p className="text-xs text-purple-300/80 mt-1 max-w-sm mx-auto">
+                        Carregando o WhatsApp Web e gerando a sessão segura. O QR Code aparecerá em aproximadamente 10 a 15 segundos...
+                      </p>
+                    </div>
+                    <div className="w-48 h-1.5 bg-white/10 rounded-full mx-auto overflow-hidden">
+                      <div className="w-full h-full bg-gradient-to-r from-purple-500 via-indigo-400 to-emerald-400 animate-pulse"></div>
                     </div>
                   </div>
                 ) : (
                   <div className="text-center space-y-4">
                     <div className="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto border border-amber-500/20 text-amber-400">
-                      <RefreshCcw size={28} className={isReconnecting ? 'animate-spin' : ''} />
+                      <RefreshCcw size={28} />
                     </div>
                     <div>
                       <h4 className="font-bold text-lg text-white">WhatsApp Desconectado</h4>
@@ -568,7 +598,7 @@ export default function LeadScannerSettings() {
                       disabled={isReconnecting}
                       className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-[0_0_15px_rgba(16,185,129,0.3)]"
                     >
-                      {isReconnecting ? 'Iniciando Sessão...' : 'Conectar WhatsApp'}
+                      Conectar WhatsApp
                     </button>
                   </div>
                 )}

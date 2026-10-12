@@ -554,6 +554,7 @@ const userQrCodes = {};
 const userReconnectAttempts = {};
 const userChatSessions = {};
 const userChatState = {};
+const userWhatsappStartTime = {};
 
 const campaignStates = {};
 const autoSendEnabled = {};
@@ -892,10 +893,11 @@ function initUserWhatsApp(userId) {
       ] 
     },
     authTimeoutMs: 60000,
-    qrMaxRetries: 3
+    qrMaxRetries: 6
   });
   
   whatsappClients[userId] = client;
+  userWhatsappStartTime[userId] = Date.now();
   userWhatsappStatus[userId] = 'STARTING';
   userQrCodes[userId] = null;
   userReconnectAttempts[userId] = 0;
@@ -1075,7 +1077,12 @@ function initUserWhatsApp(userId) {
     }
   });
 
-  client.initialize().catch((err)=>{ console.error('[Bot Error] Falha na inicialização do WhatsApp:', err); });
+  client.initialize().catch((err) => { 
+    console.error(`[Bot Error] Falha na inicialização do WhatsApp para usuário ${userId}:`, err); 
+    userWhatsappStatus[userId] = 'DISCONNECTED';
+    userQrCodes[userId] = null;
+    delete whatsappClients[userId];
+  });
 }
 
 async function autoReconnect(userId) {
@@ -1098,17 +1105,27 @@ app.get('/api/whatsapp/status', checkTrialActive, (req, res) => {
 app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
   if (userWhatsappStatus[userId] === 'CONNECTED') return res.json({ success: true, message: 'Já conectado!' });
+
+  const now = Date.now();
+  if (userWhatsappStatus[userId] === 'STARTING' && (now - (userWhatsappStartTime[userId] || 0) < 35000)) {
+    return res.json({ success: true, message: 'Inicialização em andamento. O QR Code aparecerá em instantes.' });
+  }
+
+  userWhatsappStartTime[userId] = now;
+  userWhatsappStatus[userId] = 'STARTING';
   res.json({ success: true, message: 'Reconexão iniciada.' });
+
   try {
-    userWhatsappStatus[userId] = 'DISCONNECTING';
     if(whatsappClients[userId]) {
-      // Destrói sessão local que está falhando
       try { await whatsappClients[userId].destroy(); } catch(e) {}
       delete whatsappClients[userId];
     }
     await cleanSessionSafely(userId);
     initUserWhatsApp(userId);
-  } catch (err) {}
+  } catch (err) {
+    console.error(`Erro ao reconectar WhatsApp para ${userId}:`, err);
+    userWhatsappStatus[userId] = 'DISCONNECTED';
+  }
 });
 
 app.post('/api/whatsapp/disconnect', checkTrialActive, async (req, res) => {
