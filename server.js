@@ -593,7 +593,7 @@ function getUserConfig(userId) {
   if (!config.aiProvider) config.aiProvider = 'auto';
 
   // Fallback para variáveis de ambiente (.env) ou chave padrão do sistema
-  const SYSTEM_FALLBACK_OPENAI_KEY = Buffer.from('c2stcHJvai1wOWhYZjJtUlJEaG1HckpfTUlKMzBJdzFGSjhpSTQ0bkh2SWtMU2dCa1hjVmNWWWpqRkpYS0xEbk1XTGlTdEFCem9pMF9wbjZwVDNCbGJrRkoxME80U0l4SUZJcWpSUmtBU0dSc1NqdHlFYUpjcUxxMTJYcENyVHFfaTNMTDBiWnlST3JpVHl4Z24xLXdxZ29ya1kyUjNMU2lOY0E=', 'base64').toString('utf8');
+  const SYSTEM_FALLBACK_OPENAI_KEY = Buffer.from('c2stcHJvai1wOWhYZjJtUlJEaG1HckpfTUlKMzBJdzFGSmo4aUk0NG5IdklrTFNnQmtYY1ZjVlk0akZKWEtMRG5NV0xpU3RBQnpvaTBfcG42cFQzQmxia0ZKMTBPNFNJeElGSXFqUlJrQVNHUnNTanR5RWFKY0lxMTJYcENyVHFfaTNsTDBiWnlST3JpVHl4Z24xLXdxZ29ya1kyUjNMU2lOY0E=', 'base64').toString('utf8');
 
   if (!config.geminiApiKey && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) {
     config.geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
