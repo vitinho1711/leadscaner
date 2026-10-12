@@ -555,6 +555,7 @@ const userReconnectAttempts = {};
 const userChatSessions = {};
 const userChatState = {};
 const userWhatsappStartTime = {};
+const userWhatsappError = {};
 
 const campaignStates = {};
 const autoSendEnabled = {};
@@ -872,13 +873,44 @@ function isSamePhone(p1, p2) {
   return false;
 }
 
+function resolveChromiumPath() {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+  const candidates = [
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium'
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return undefined;
+}
+
 function initUserWhatsApp(userId) {
   if (whatsappClients[userId]) return;
   
+  userWhatsappStartTime[userId] = Date.now();
+  userWhatsappStatus[userId] = 'STARTING';
+  userQrCodes[userId] = null;
+  userWhatsappError[userId] = null;
+  userReconnectAttempts[userId] = 0;
+  userChatSessions[userId] = {};
+
+  const execPath = resolveChromiumPath();
+  console.log(`[WhatsApp ${userId}] Inicializando com executablePath:`, execPath || 'padrão do puppeteer');
+
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: AUTH_DIR }),
+    webVersionCache: {
+      type: 'remote',
+      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-js/main/dist/wppconnect-wa.js'
+    },
     puppeteer: { 
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      executablePath: execPath,
       headless: true, 
       timeout: 60000,
       protocolTimeout: 300000,
@@ -889,19 +921,14 @@ function initUserWhatsApp(userId) {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions'
       ] 
     },
     authTimeoutMs: 60000,
     qrMaxRetries: 6
   });
-  
-  whatsappClients[userId] = client;
-  userWhatsappStartTime[userId] = Date.now();
-  userWhatsappStatus[userId] = 'STARTING';
-  userQrCodes[userId] = null;
-  userReconnectAttempts[userId] = 0;
-  userChatSessions[userId] = {};
 
   client.on('qr', async (qr) => {
     try { 
@@ -1081,6 +1108,7 @@ function initUserWhatsApp(userId) {
     console.error(`[Bot Error] Falha na inicialização do WhatsApp para usuário ${userId}:`, err); 
     userWhatsappStatus[userId] = 'DISCONNECTED';
     userQrCodes[userId] = null;
+    userWhatsappError[userId] = (err && (err.message || err.stack)) || String(err);
     delete whatsappClients[userId];
   });
 }
@@ -1099,7 +1127,11 @@ async function autoReconnect(userId) {
 // ENDPOINTS WHATSAPP
 app.get('/api/whatsapp/status', checkTrialActive, (req, res) => {
   const userId = req.user.id;
-  res.json({ status: userWhatsappStatus[userId] || 'DISCONNECTED', qr: userQrCodes[userId] || null });
+  res.json({ 
+    status: userWhatsappStatus[userId] || 'DISCONNECTED', 
+    qr: userQrCodes[userId] || null,
+    error: userWhatsappError[userId] || null 
+  });
 });
 
 app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
