@@ -41,16 +41,19 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
     setSearchResults([]);
     setSelectedIds(new Set());
     try {
+      const token = localStorage.getItem('sdr_jwt_token') || localStorage.getItem('token');
+      const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 65000); // 65s timeout para absorver cold starts do Render
       const res = await fetch(`/api/scrape?query=${encodeURIComponent(nicho)}&location=${encodeURIComponent(cidade)}&limit=${limite}&onlyWithoutSite=${onlyWithoutSite}`, {
+        headers: authHeaders,
         signal: controller.signal
       });
       clearTimeout(timeoutId);
 
       if (!res.ok) {
         if (res.status === 502 || res.status === 504) {
-          throw new Error('O servidor backend no Render estava hibernando ou demorou para inicializar. Aguarde 20 segundos e tente buscar novamente.');
+          throw new Error('O servidor backend no Render estava acordando da hibernação. Tente novamente em alguns segundos.');
         }
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.error || `Erro de resposta do servidor (${res.status}).`);
@@ -129,10 +132,16 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
         return;
       }
 
+      const token = localStorage.getItem('sdr_jwt_token') || localStorage.getItem('token');
+      const authHeaders = {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      };
+
       // Salva no backend
       const res = await fetch('/api/leads', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify(newLeads)
       });
       const result = await res.json();
@@ -140,7 +149,7 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
       // Salva no histórico
       await fetch('/api/history', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({
           name: file.name,
           total: rows.length,
