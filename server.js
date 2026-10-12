@@ -822,7 +822,18 @@ async function createAiCompletion(userId, options) {
 // WHATSAPP INIT POR USUÁRIO
 const AUTH_DIR = path.join(DATA_DIR, '.sdr_wwebjs_auth');
 
+function getEffectiveWaUserId(userId) {
+  if (!userId) return '1';
+  const user = dbUsers.find(u => u.id === userId);
+  // Contas administradoras da agência (admin, socio, etc.) operam sob a mesma infraestrutura de WhatsApp compartilhada
+  if (user && user.role === 'admin') {
+    return '1';
+  }
+  return userId;
+}
+
 async function cleanSessionSafely(userId) {
+  userId = getEffectiveWaUserId(userId);
   const sessionDir = path.join(AUTH_DIR, `session-${userId}`);
   if (!fs.existsSync(sessionDir)) return;
   
@@ -891,6 +902,7 @@ function resolveChromiumPath() {
 }
 
 function initUserWhatsApp(userId) {
+  userId = getEffectiveWaUserId(userId);
   if (whatsappClients[userId]) return;
   
   userWhatsappStartTime[userId] = Date.now();
@@ -905,10 +917,7 @@ function initUserWhatsApp(userId) {
 
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId, dataPath: AUTH_DIR }),
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-js/main/dist/wppconnect-wa.js'
-    },
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     puppeteer: { 
       executablePath: execPath,
       headless: true, 
@@ -923,18 +932,31 @@ function initUserWhatsApp(userId) {
         '--no-zygote',
         '--disable-gpu',
         '--disable-software-rasterizer',
-        '--disable-extensions'
+        '--disable-extensions',
+        '--js-flags=--max-old-space-size=256'
       ] 
     },
     authTimeoutMs: 60000,
-    qrMaxRetries: 6
+    qrMaxRetries: 10
   });
+
+  whatsappClients[userId] = client;
 
   client.on('qr', async (qr) => {
     try { 
-      userQrCodes[userId] = await qrcodeImage.toDataURL(qr); 
+      userQrCodes[userId] = await qrcodeImage.toDataURL(qr, { margin: 2, scale: 8 }); 
       userWhatsappStatus[userId] = 'QR_READY'; 
-    } catch (err) {}
+      console.log(`[WhatsApp ${userId}] 📲 Novo QR Code gerado! Aguardando escaneamento...`);
+      try { qrcodeTerminal.generate(qr, { small: true }); } catch (tErr) {}
+    } catch (err) {
+      console.error(`[WhatsApp ${userId}] Erro ao gerar imagem do QR:`, err);
+    }
+  });
+
+  client.on('authenticated', () => {
+    console.log(`[WhatsApp ${userId}] 🔐 Autenticado com sucesso! Sincronizando dados com o WhatsApp...`);
+    userWhatsappStatus[userId] = 'CONNECTING';
+    userQrCodes[userId] = null;
   });
 
   client.on('ready', () => {
@@ -945,14 +967,18 @@ function initUserWhatsApp(userId) {
   });
 
   client.on('disconnected', async () => {
+    console.log(`[WhatsApp ${userId}] ⚠️ WhatsApp desconectado.`);
     userWhatsappStatus[userId] = 'DISCONNECTED'; 
     userQrCodes[userId] = null;
+    delete whatsappClients[userId];
     setTimeout(() => autoReconnect(userId), 10000);
   });
 
   client.on('auth_failure', async () => {
+    console.error(`[WhatsApp ${userId}] ❌ Falha de autenticação.`);
     userWhatsappStatus[userId] = 'DISCONNECTED'; 
     userQrCodes[userId] = null;
+    delete whatsappClients[userId];
     await cleanSessionSafely(userId);
     setTimeout(() => autoReconnect(userId), 5000);
   });
@@ -1114,6 +1140,7 @@ function initUserWhatsApp(userId) {
 }
 
 async function autoReconnect(userId) {
+  userId = getEffectiveWaUserId(userId);
   if (userWhatsappStatus[userId] === 'CONNECTED') return;
   userReconnectAttempts[userId]++;
   if (userReconnectAttempts[userId] > 5) { userReconnectAttempts[userId] = 0; return; }
@@ -1126,7 +1153,7 @@ async function autoReconnect(userId) {
 
 // ENDPOINTS WHATSAPP
 app.get('/api/whatsapp/status', checkTrialActive, (req, res) => {
-  const userId = req.user.id;
+  const userId = getEffectiveWaUserId(req.user.id);
   res.json({ 
     status: userWhatsappStatus[userId] || 'DISCONNECTED', 
     qr: userQrCodes[userId] || null,
@@ -1135,7 +1162,7 @@ app.get('/api/whatsapp/status', checkTrialActive, (req, res) => {
 });
 
 app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
-  const userId = req.user.id;
+  const userId = getEffectiveWaUserId(req.user.id);
   if (userWhatsappStatus[userId] === 'CONNECTED') return res.json({ success: true, message: 'Já conectado!' });
 
   const now = Date.now();
@@ -1152,6 +1179,7 @@ app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
       try { await whatsappClients[userId].destroy(); } catch(e) {}
       delete whatsappClients[userId];
     }
+    await new Promise(r => setTimeout(r, 1000));
     await cleanSessionSafely(userId);
     initUserWhatsApp(userId);
   } catch (err) {
@@ -1161,7 +1189,7 @@ app.post('/api/whatsapp/reconnect', checkTrialActive, async (req, res) => {
 });
 
 app.post('/api/whatsapp/disconnect', checkTrialActive, async (req, res) => {
-  const userId = req.user.id;
+  const userId = getEffectiveWaUserId(req.user.id);
   userWhatsappStatus[userId] = 'DISCONNECTING';
   
   try {
@@ -2397,7 +2425,8 @@ app.put('/api/leads/:id/status', checkTrialActive, (req, res) => {
 
 app.post('/api/leads/clean', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
-  if (userWhatsappStatus[userId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
+  const waUserId = getEffectiveWaUserId(userId);
+  if (userWhatsappStatus[waUserId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
   
   const userLeads = dbLeads.filter(l => l.userId === userId);
   const otherLeads = dbLeads.filter(l => l.userId !== userId);
@@ -2408,7 +2437,7 @@ app.post('/api/leads/clean', checkTrialActive, async (req, res) => {
   for (const l of userLeads) {
     if (!l.whatsapp || l.whatsapp === 'não informado') continue;
     try {
-      const isRegistered = await whatsappClients[userId].isRegisteredUser(String(l.whatsapp).replace(/\D/g, '') + '@c.us');
+      const isRegistered = await whatsappClients[waUserId].isRegisteredUser(String(l.whatsapp).replace(/\D/g, '') + '@c.us');
       if (isRegistered) valid.push(l);
     } catch(e) { valid.push(l); }
     await new Promise(r => setTimeout(r, 250));
@@ -2438,27 +2467,48 @@ function humanizeMessage(template, lead) {
   }
   msg = spintaxResolved;
 
-  const cleanName = (str, defaultVal) => {
-    if (!str || str === 'não informado') return defaultVal;
-    return str.split(/[,|\-]/)[0].trim();
+  // Limpeza inteligente sem quebrar palavras compostas com hífen (ex: Lava-rápido, Pós-venda)
+  const cleanNicho = (str) => {
+    if (!str || str === 'não informado') return 'serviços';
+    return str
+      .replace(/\s+-\s+.*$/, '')
+      .replace(/\|.*$/, '')
+      .replace(/,.*$/, '')
+      .trim();
   };
 
-  const leadNomeLimpo = cleanName(lead.nome, 'Empresa');
-  const leadNichoLimpo = cleanName(lead.nicho, 'seu segmento');
+  const cleanEmpresa = (str) => {
+    if (!str || str === 'não informado') return 'sua empresa';
+    return str
+      .replace(/\s*\([^)]*\)/g, '')
+      .replace(/\s+-\s+.*$/, '')
+      .replace(/\|.*$/, '')
+      .replace(/,.*$/, '')
+      .replace(/\b(ltda|me|epp|eireli|s\/a)\b/gi, '')
+      .trim();
+  };
 
-  msg = msg.replace(/{nome}/g, (lead.nome || 'Lider').split(' ')[0]);
-  msg = msg.replace(/{empresa}/g, leadNomeLimpo);
+  const leadEmpresaLimpa = cleanEmpresa(lead.nome);
+  const leadNichoLimpo = cleanNicho(lead.nicho);
+  
+  // Nome natural: se tiver nome de contato real, usa o 1º nome. Se for empresa, usa o nome da empresa limpo!
+  const leadNomeNatural = (lead.contato && lead.contato !== 'não informado' && lead.contato.trim().length > 2)
+    ? lead.contato.trim().split(' ')[0]
+    : leadEmpresaLimpa;
+
+  msg = msg.replace(/{nome}/g, leadNomeNatural);
+  msg = msg.replace(/{empresa}/g, leadEmpresaLimpa);
   msg = msg.replace(/{nicho}/g, leadNichoLimpo);
-  msg = msg.replace(/{cidade}/g, cleanName(lead.cidade, 'sua região'));
+  msg = msg.replace(/{cidade}/g, (lead.cidade && lead.cidade !== 'não informado') ? lead.cidade.split(/[,|\-]/)[0].trim() : 'sua região');
   const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-  msg = msg.replace(/{saudacao}/g, () => pick(['Oi', 'Olá', 'E aí', 'Fala', 'Opa']));
+  msg = msg.replace(/{saudacao}/g, () => pick(['Oi', 'Olá', 'Tudo bem?', 'Fala', 'Opa']));
   msg = msg.replace(/{emoji_oi}/g, () => pick(['👋', '✨', '']));
   msg = msg.replace(/{emoji}/g, () => pick(['🚀', '🔥', '💡', '']));
   msg = msg.replace(/{tempo}/g, () => pick(['hoje', 'agora pouco', 'esses dias']));
   msg = msg.replace(/{vi}/g, () => pick(['Vi', 'Encontrei', 'Dei uma olhada na']));
   
   // Basic auto-randomization if user didn't use spintax
-  msg = msg.replace(/Opa \{nome\}, tudo bem\?/gi, () => pick(['Opa', 'Oi', 'Olá', 'Fala']) + ` ${(lead.nome || 'Lider').split(' ')[0]}, ` + pick(['tudo bem?', 'como vai?', 'tudo certo?']));
+  msg = msg.replace(/Opa \{nome\}, tudo bem\?/gi, () => pick(['Opa', 'Oi', 'Olá', 'Fala']) + ` ${leadNomeNatural}, ` + pick(['tudo bem?', 'como vai?', 'tudo certo?']));
   msg = msg.replace(/Estava dando uma olhada/gi, () => pick(['Estava dando uma olhada', 'Tava vendo', 'Dei uma olhada', 'Achei', 'Encontrei']));
   msg = msg.replace(/achei fant(a|á)stico o trabalho/gi, () => pick(['achei fantástico o trabalho', 'gostei muito do trabalho', 'achei incrível o que fazem']));
   msg = msg.replace(/Notei que/gi, () => pick(['Notei que', 'Percebi que', 'Vi que']));
@@ -2503,12 +2553,13 @@ async function startAutoSendLoop(userId) {
   if (autoSendRunning[userId]) return;
   autoSendRunning[userId] = true;
   if (!autoSendStats[userId]) autoSendStats[userId] = { sent: 0, failed: 0, skipped: 0, lastSentAt: null, lastLeadName: null };
+  const waUserId = getEffectiveWaUserId(userId);
   
   let batchCount = 0;
   while (autoSendEnabled[userId]) {
     const pending = dbLeads.find(l => l.userId === userId && !l.messageSent && l.whatsapp && l.whatsapp !== 'não informado' && String(l.whatsapp).replace(/\D/g, '').length >= 10);
     if (!pending) { await new Promise(r => setTimeout(r, 30000)); continue; }
-    if (userWhatsappStatus[userId] !== 'CONNECTED') { await new Promise(r => setTimeout(r, 15000)); continue; }
+    if (userWhatsappStatus[waUserId] !== 'CONNECTED') { await new Promise(r => setTimeout(r, 15000)); continue; }
     
     let number = String(pending.whatsapp).replace(/\D/g, '');
     if (number.length <= 5) { pending.messageSent = true; pending.messageStatus = 'SEM_WHATSAPP'; saveLeads(); autoSendStats[userId].skipped++; continue; }
@@ -2516,7 +2567,7 @@ async function startAutoSendLoop(userId) {
     if (number.length === 10 || number.length === 11) number = '55' + number;
     
     try {
-      const contactId = await whatsappClients[userId].getNumberId(number);
+      const contactId = await whatsappClients[waUserId].getNumberId(number);
       if (!contactId) { pending.messageSent = true; pending.messageStatus = 'SEM_WHATSAPP'; pending.status = 'FRIO'; saveLeads(); autoSendStats[userId].skipped++; continue; }
       
       const userTemplates = campaignTemplates.filter(t => t.userId === userId);
@@ -2525,19 +2576,19 @@ async function startAutoSendLoop(userId) {
       const msg = humanizeMessage(tpls[Math.floor(Math.random()*tpls.length)], pending);
       
       await new Promise(r => setTimeout(r, Math.random() * 3000 + 2000));
-      await whatsappClients[userId].sendMessage(contactId._serialized, msg);
+      await whatsappClients[waUserId].sendMessage(contactId._serialized, msg);
       
-      if (!userChatSessions[userId]) userChatSessions[userId] = {};
-      if (!userChatSessions[userId][contactId._serialized]) {
-        userChatSessions[userId][contactId._serialized] = [{
+      if (!userChatSessions[waUserId]) userChatSessions[waUserId] = {};
+      if (!userChatSessions[waUserId][contactId._serialized]) {
+        userChatSessions[waUserId][contactId._serialized] = [{
           role: "system",
           content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${pending.nome || 'Não informado'} - ${pending.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o DÍGITO correspondente à opção (ex: 1, 2 ou 3) que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
         }];
       }
-      userChatSessions[userId][contactId._serialized].push({ role: "assistant", content: msg });
+      userChatSessions[waUserId][contactId._serialized].push({ role: "assistant", content: msg });
       
-      if (!userChatState[userId]) userChatState[userId] = {};
-      userChatState[userId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
+      if (!userChatState[waUserId]) userChatState[waUserId] = {};
+      userChatState[waUserId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
       
       pending.messageSent = true; pending.messageSentAt = new Date().toISOString(); pending.messageStatus = 'ENVIADO'; pending.status = 'CHAMADO'; pending.lastInteraction = pending.messageSentAt; saveLeads();
       autoSendStats[userId].sent++; autoSendStats[userId].lastSentAt = pending.messageSentAt; autoSendStats[userId].lastLeadName = pending.nome;
@@ -2578,7 +2629,8 @@ app.post('/api/whatsapp/campaign/stop', checkTrialActive, checkProTier, (req, re
 
 app.post('/api/whatsapp/campaign/start', checkTrialActive, checkProTier, async (req, res) => {
   const userId = req.user.id;
-  if (userWhatsappStatus[userId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
+  const waUserId = getEffectiveWaUserId(userId);
+  if (userWhatsappStatus[waUserId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
   if (campaignStates[userId]?.isRunning) return res.status(400).json({ error: 'Campanha já rodando' });
   
   // Check message limit for trial users
@@ -2598,8 +2650,9 @@ app.post('/api/whatsapp/campaign/start', checkTrialActive, checkProTier, async (
 
 async function processCampaign(userId, leads, templates, delayMin, delayMax, batchSize, batchPause, attachPdf = false) {
   let batchCount = 0;
+  const waUserId = getEffectiveWaUserId(userId);
   const state = campaignStates[userId];
-  const client = whatsappClients[userId];
+  const client = whatsappClients[waUserId];
 
   for (const lead of leads) {
     if (state.shouldStop) break;
@@ -2638,26 +2691,26 @@ async function processCampaign(userId, leads, templates, delayMin, delayMax, bat
           const media = MessageMedia.fromFilePath(dbLeadRef.pdfPath);
           await client.sendMessage(contactId._serialized, media, { caption: message });
           sentWithPdf = true;
-          console.log(`[User ${userId}] 📎 Mensagem com PDF anexo enviada para ${lead.nome}`);
+          console.log(`[User ${userId} / WA ${waUserId}] 📎 Mensagem com PDF anexo enviada para ${lead.nome}`);
         } catch (mediaErr) {
-          console.warn(`[User ${userId}] Falha ao anexar PDF, enviando texto puro:`, mediaErr.message);
+          console.warn(`[User ${userId} / WA ${waUserId}] Falha ao anexar PDF, enviando texto puro:`, mediaErr.message);
           await client.sendMessage(contactId._serialized, message);
         }
       } else {
         await client.sendMessage(contactId._serialized, message);
       }
       
-      if (!userChatSessions[userId]) userChatSessions[userId] = {};
-      if (!userChatSessions[userId][contactId._serialized]) {
-        userChatSessions[userId][contactId._serialized] = [{
+      if (!userChatSessions[waUserId]) userChatSessions[waUserId] = {};
+      if (!userChatSessions[waUserId][contactId._serialized]) {
+        userChatSessions[waUserId][contactId._serialized] = [{
           role: "system",
           content: `Você é um SDR. Qualifique o lead de forma curta e natural. Lead: ${lead.nome || 'Não informado'} - ${lead.nicho || 'Não informado'}. REGRA IMPORTANTE: Se a mensagem do lead parecer um robô de autoatendimento com menu numérico (ex: "Digite 1 para X"), responda APENAS com o DÍGITO correspondente à opção (ex: 1, 2 ou 3) que leva ao setor comercial, atendimento ou gerência. Se for mensagem de ausência, mande uma abordagem amigável pedindo para falar com o responsável.`
         }];
       }
-      userChatSessions[userId][contactId._serialized].push({ role: "assistant", content: message });
+      userChatSessions[waUserId][contactId._serialized].push({ role: "assistant", content: message });
       
-      if (!userChatState[userId]) userChatState[userId] = {};
-      userChatState[userId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
+      if (!userChatState[waUserId]) userChatState[waUserId] = {};
+      userChatState[waUserId][contactId._serialized] = { mode: 'BOT', lastActivity: Date.now(), lastSender: 'bot', followUpCount: 0 };
       
       const dbLead = dbLeads.find(l => l.id === lead.id);
       if (dbLead) {
@@ -2732,15 +2785,16 @@ app.post('/api/whatsapp/templates', checkTrialActive, checkProTier, (req, res) =
 
 app.post('/api/whatsapp/message', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
+  const waUserId = getEffectiveWaUserId(userId);
   // Check message limit for trial users
   if (req.dbUser && req.dbUser.plan) {
     if (req.dbUser.plan.usage.messagesToday >= req.dbUser.plan.limits.maxMessagesPerDay) {
       return res.status(403).json({ error: `Limite de ${req.dbUser.plan.limits.maxMessagesPerDay} mensagens por dia atingido.`, code: 'LIMIT_MESSAGES' });
     }
   }
-  if (userWhatsappStatus[userId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
+  if (userWhatsappStatus[waUserId] !== 'CONNECTED') return res.status(400).json({ error: 'WhatsApp não conectado' });
   try {
-    await whatsappClients[userId].sendMessage(String(req.body.number || '').replace(/\D/g, '') + '@c.us', req.body.message);
+    await whatsappClients[waUserId].sendMessage(String(req.body.number || '').replace(/\D/g, '') + '@c.us', req.body.message);
     // Increment daily message count for trial users
     if (req.dbUser && req.dbUser.plan && req.dbUser.plan.usage) { req.dbUser.plan.usage.messagesToday++; saveUsers(); }
     res.json({ success: true });
@@ -3154,24 +3208,24 @@ app.post('/api/ai/generate-batch-templates', checkTrialActive, checkProTier, asy
 
     const generateChunk = async (chunkQty, index) => {
       const angle = ANGLES[index % ANGLES.length];
-      const prompt = `Você é um SDR (Sales Development Representative) especialista em abordagens comerciais frias B2B via WhatsApp.
-Sua tarefa é criar exatamente ${chunkQty} variações ÚNICAS, curtas, envolventes e de alta conversão de mensagens de primeiro contato (prospecção fria) para atrair clientes do nicho de "${niche}".
+      const prompt = `Você é um SDR especialista em abordagens comerciais de altíssima conversão pelo WhatsApp.
+Sua tarefa é criar exatamente ${chunkQty} variações ÚNICAS, extremamente HUMANAS, curtas e envolventes de primeiro contato para prospecção fria no nicho de "${niche}".
 
 ÂNGULO PRINCIPAL DESTE LOTE: ${angle}.
 Tom solicitado: "${tone}".
 
-Diretrizes obrigatórias de cada mensagem:
-1. Apresentar o remetente ${salesperson ? `como "${salesperson}"` : ""} e dizer que atua com "${service}".
-2. Citar que viu o trabalho deles no Google ou nas redes sociais, que achou excelente, mas que percebeu uma oportunidade de valorizar ainda mais os serviços deles com uma página moderna para atrair mais clientes pelo WhatsApp.
-3. Oferecer a criação de um modelo/esboço exclusivo do site sem compromisso para eles verem como ficaria.
-4. Escrever em tom de conversa humana real: muito casual, amigável, direto, sem formalidades excessivas.
-5. Mensagem concisa (2 a 4 frases curtas e diretas), terminando com uma pergunta amigável chamando para a conversa.
+DIRETRIZES DE OURO (MUITO IMPORTANTE PARA NÃO PARECER SPAM):
+1. ESCREVA COMO UMA PESSOA REAL conversando no WhatsApp (amigável, direta, casual).
+2. NUNCA use clichês robóticos como "criação de sites estratégicos", "modelo exclusivo sem custo", "seu perfil está incrível", "passar mais credibilidade".
+3. Mantenha a mensagem CURTA (apenas 2 a 3 frases rápidas). No WhatsApp mensagens longas são ignoradas.
+4. O objetivo exclusivo desta primeira mensagem é ABRIR UMA CONVERSA (fazer o lead responder), mostrando que você conhece o negócio deles.
+5. Termine SEMPRE com uma pergunta leve e natural que seja muito fácil e rápida de responder.
 6. Use e intercale variáveis de template para preenchimento dinâmico:
    - {saudacao} (ex: "Oi", "Olá", "Tudo bem?")
    - {nome} ou {empresa} (nome da empresa do lead)
-   - {nicho} (segmento do lead, ex: "academia", "restaurante")
+   - {nicho} (ex: "${niche}")
    - {cidade} (região do lead)
-   - {emoji} ou {emoji_oi} (emojis casuais)
+   - {emoji_oi} ou {emoji} (emojis leves)
 7. Não retorne markdown fora do JSON.
 
 Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
@@ -3388,7 +3442,8 @@ setInterval(async () => {
       if (state.mode === 'BOT' && state.lastSender === 'bot' && state.followUpCount === 0 && (now - state.lastActivity) > FOLLOW_UP_TIME) {
         
         // Ensure client is connected
-        const cl = whatsappClients[userId];
+        const waUserId = getEffectiveWaUserId(userId);
+        const cl = whatsappClients[waUserId];
         if (!cl || !cl.info) continue;
 
         try {
@@ -3493,9 +3548,14 @@ app.listen(PORT, () => {
   // O WhatsApp é iniciado sob demanda apenas quando o usuário clica em Conectar ou se AUTO_START_WHATSAPP=true
   const isCloudEnv = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID || process.env.NODE_ENV === 'production';
   if (!isCloudEnv && process.env.AUTO_START_WHATSAPP === 'true') {
+    const started = new Set();
     dbUsers.forEach(u => {
       try {
-        initUserWhatsApp(u.id);
+        const effId = getEffectiveWaUserId(u.id);
+        if (!started.has(effId)) {
+          started.add(effId);
+          initUserWhatsApp(effId);
+        }
       } catch(e) {
         console.error(`Erro ao iniciar WhatsApp para usuário ${u.id}:`, e);
       }

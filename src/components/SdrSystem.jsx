@@ -51,8 +51,9 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
           if (data.status === 'CONNECTED') {
             setDismissWa(true);
           }
-        } else if (res.status === 401) {
-          setGlobalWaData(prev => prev?.status === 'CONNECTING' ? prev : { status: 'CONNECTING', qr: null });
+        } else if (res.status === 401 || res.status === 403) {
+          window.dispatchEvent(new CustomEvent('auth:expired'));
+          return;
         } else {
           setGlobalWaData(prev => prev?.status === 'DISCONNECTED' ? prev : { status: 'DISCONNECTED', qr: null });
         }

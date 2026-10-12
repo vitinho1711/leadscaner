@@ -40,14 +40,47 @@ function App() {
 
   const isMenuPath = route === '/menu' || route === '/cardapio';
 
+  const handleLogout = () => {
+    localStorage.removeItem('sdr_jwt_token');
+    localStorage.removeItem('token');
+    localStorage.removeItem('sdr_user');
+    setIsAuthenticated(false);
+    setUser(null);
+    setPlanInfo(null);
+  };
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      handleLogout();
+      setError('Sua sessão expirou. Por favor, faça login novamente.');
+    };
+    window.addEventListener('auth:expired', handleAuthExpired);
+    return () => window.removeEventListener('auth:expired', handleAuthExpired);
+  }, []);
+
   useEffect(() => {
     const token = localStorage.getItem('sdr_jwt_token');
     const savedUser = localStorage.getItem('sdr_user');
     if (token && savedUser) {
-      setIsAuthenticated(true);
-      try {
-        setUser(JSON.parse(savedUser.startsWith('{') ? savedUser : atob(savedUser)));
-      } catch(e) {}
+      // Valida o token contra o backend
+      fetch('/api/plan', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }).then(res => {
+        if (res.ok) {
+          setIsAuthenticated(true);
+          try {
+            setUser(JSON.parse(savedUser.startsWith('{') ? savedUser : atob(savedUser)));
+          } catch(e) {}
+          res.json().then(data => setPlanInfo(data)).catch(() => {});
+        } else if (res.status === 401 || res.status === 403) {
+          handleLogout();
+          setError('Sessão expirada. Acesse com seu código ou credenciais.');
+        } else {
+          setIsAuthenticated(true);
+        }
+      }).catch(() => {
+        setIsAuthenticated(true);
+      });
     }
 
     const handleStorage = () => {
@@ -74,6 +107,9 @@ function App() {
         if (res.ok) {
           const data = await res.json();
           setPlanInfo(data);
+        } else if (res.status === 401 || res.status === 403) {
+          handleLogout();
+          setError('Sessão expirada. Acesse novamente.');
         }
       } catch (e) {
         console.error('Erro ao buscar plano:', e);
@@ -154,15 +190,6 @@ function App() {
     } catch (err) {
       setError('Erro de conexão com o servidor');
     }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('sdr_jwt_token');
-    localStorage.removeItem('token');
-    localStorage.removeItem('sdr_user');
-    setIsAuthenticated(false);
-    setUser(null);
-    setPlanInfo(null);
   };
 
   if (isMenuPath) {
