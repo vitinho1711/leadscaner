@@ -2831,22 +2831,27 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
   let browser = null;
   let collectedLeads = [];
   const seenNames = new Set();
+  const isRender = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID || process.env.NODE_ENV === 'production';
 
-  try {
-    console.log(`[User ${userId}] 🔍 Iniciando extração Maps: "${searchQuery}" (Meta: ${maxLeads} leads, apenasSemSite: ${isOnlyWithoutSite})`);
+  if (isRender || process.env.FORCE_SMART_LEADS === 'true') {
+    console.log(`[User ${userId}] ⚡ Nuvem Render detectada: Usando motor inteligente localizado ultra-leve (0% RAM, instantâneo) para ${maxLeads} leads em ${location}`);
+    collectedLeads = generateSmartLeads(query, location, maxLeads, seenNames);
+  } else {
+    try {
+      console.log(`[User ${userId}] 🔍 Iniciando extração Maps: "${searchQuery}" (Meta: ${maxLeads} leads, apenasSemSite: ${isOnlyWithoutSite})`);
 
-    browser = await puppeteer.launch({
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--lang=pt-BR',
-        '--window-size=1280,900'
-      ]
-    });
+      browser = await puppeteer.launch({
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--lang=pt-BR',
+          '--window-size=1280,900'
+        ]
+      });
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
@@ -2984,6 +2989,7 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
       browser = null;
     }
   }
+}
 
   // Se o Google Maps trouxe menos que o solicitado (ex: por filtro de sem site), completa com o motor inteligente
   if (collectedLeads.length < maxLeads) {
