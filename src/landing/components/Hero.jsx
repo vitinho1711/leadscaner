@@ -20,7 +20,13 @@ export default function Hero() {
           <a href="#faq" className="hover:text-purple-400 transition-colors">FAQ</a>
         </div>
         <div>
-          <button onClick={() => window.location.href='/login'} className="btn-outline !py-2 !px-6 !text-sm">
+          <button 
+            onClick={() => {
+              const q = window.location.search || '';
+              window.location.href = '/login' + q;
+            }} 
+            className="btn-outline !py-2 !px-6 !text-sm"
+          >
             Entrar
           </button>
         </div>
@@ -51,11 +57,23 @@ export default function Hero() {
           </p>
           
           <div className="flex flex-wrap items-center gap-4 mt-4">
-            <button onClick={() => window.location.href='/register'} className="btn-primary group">
+            <button 
+              onClick={() => {
+                const q = window.location.search || '';
+                window.location.href = '/login' + q;
+              }} 
+              className="btn-primary group"
+            >
               Começar Agora
               <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />
             </button>
-            <button className="btn-outline group">
+            <button 
+              onClick={() => {
+                const q = window.location.search || '';
+                window.location.href = '/login' + q;
+              }}
+              className="btn-outline group"
+            >
               <Play size={20} className="text-fuchsia-400 group-hover:text-white transition-colors" />
               Ver Demonstração
             </button>

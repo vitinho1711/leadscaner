@@ -7,13 +7,16 @@ import LeadScannerHistory from './LeadScannerHistory';
 import LeadScannerSettings from './LeadScannerSettings';
 import LeadScannerAccount from './LeadScannerAccount';
 import LeadScannerInvites from './LeadScannerInvites';
-import SdrSitePrompts from './SdrSitePrompts';
+import SdrAiTraining from './SdrAiTraining';
+import SiteBuilderView from './SiteBuilder/SiteBuilderView';
+import LeadScannerGringaLeads from './LeadScannerGringaLeads';
+import LeadScannerInternational from './LeadScannerInternational';
 import { 
   Bot, MessageSquare, PieChart, Users, TrendingUp, Calendar, Clock, 
   CheckCircle, Zap, ShieldCheck, ChevronRight, Activity, Bell, Send,
   Target, BarChart2, MessageCircle, RefreshCcw, Trash2,
   Megaphone, Play, Square, Plus, PenLine, Copy, AlertTriangle, Shuffle,
-  Power, Rocket, RotateCcw, Pause, LayoutDashboard, PlusCircle, History, Mail, Settings, User, LogOut, Monitor, Gift, Sparkles, Loader2
+  Power, Rocket, RotateCcw, Pause, LayoutDashboard, PlusCircle, History, Mail, Settings, User, LogOut, Monitor, Gift, Sparkles, Loader2, Globe
 } from 'lucide-react';
 
 export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }) {
@@ -40,22 +43,25 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
         });
         if (res.ok) {
           const data = await res.json();
-          setGlobalWaData(data);
+          setGlobalWaData(prev => {
+            if (prev?.status === data.status && prev?.qr === data.qr) return prev;
+            return data;
+          });
           if (data.status === 'CONNECTED') {
             setDismissWa(true);
           }
         } else if (res.status === 401) {
           // If unauthorized, don't trigger the modal error state yet
-          setGlobalWaData({ status: 'CONNECTING', qr: null });
+          setGlobalWaData(prev => prev?.status === 'CONNECTING' ? prev : { status: 'CONNECTING', qr: null });
         } else {
-          setGlobalWaData({ status: 'DISCONNECTED', qr: null });
+          setGlobalWaData(prev => prev?.status === 'DISCONNECTED' ? prev : { status: 'DISCONNECTED', qr: null });
         }
       } catch(e) {
-        setGlobalWaData({ status: 'DISCONNECTED', qr: null });
+        setGlobalWaData(prev => prev?.status === 'DISCONNECTED' ? prev : { status: 'DISCONNECTED', qr: null });
       }
     };
     fetchWa();
-    const interval = setInterval(fetchWa, 3000);
+    const interval = setInterval(fetchWa, 6000);
     return () => clearInterval(interval);
   }, []);
 
@@ -92,6 +98,20 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 text-sm font-medium ${activeTab === 'leads_qualificados' ? 'bg-gradient-to-r from-purple-600/20 to-blue-600/20 text-purple-400 border border-purple-500/20 shadow-[0_0_10px_rgba(124,58,237,0.1)]' : 'text-gray-400 hover:bg-white/5 hover:text-white border border-transparent'}`}
           >
             <Activity size={18} /> Leads Qualificados
+          </button>
+          <button 
+            onClick={() => setActiveTab('prospeccao_internacional')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 text-sm font-medium ${activeTab === 'prospeccao_internacional' ? 'bg-gradient-to-r from-blue-600/30 to-emerald-600/30 text-blue-300 border border-blue-500/40 shadow-[0_0_15px_rgba(59,130,246,0.2)] font-bold' : 'text-gray-400 hover:bg-white/5 hover:text-white border border-transparent'}`}
+          >
+            <Globe size={18} className={activeTab === 'prospeccao_internacional' ? 'text-blue-400' : 'text-emerald-400'} />
+            <span className="flex-1 text-left">Leads da Gringa</span>
+            <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded-full bg-gradient-to-r from-emerald-500/30 to-blue-500/30 text-emerald-300 uppercase border border-emerald-500/30">Novo</span>
+          </button>
+          <button 
+            onClick={() => setActiveTab('gringa_crm')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 text-sm font-medium ${activeTab === 'gringa_crm' ? 'bg-gradient-to-r from-emerald-600/20 to-blue-600/20 text-emerald-400 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]' : 'text-gray-400 hover:bg-white/5 hover:text-white border border-transparent'}`}
+          >
+            <Activity size={18} /> CRM Gringa
           </button>
 
           <button 
@@ -131,7 +151,7 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
             onClick={() => setActiveTab('prompts_site')}
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200 text-sm font-medium ${activeTab === 'prompts_site' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/20 shadow-[0_0_10px_rgba(168,85,247,0.15)]' : 'text-gray-400 hover:bg-white/5 hover:text-white border border-transparent'}`}
           >
-            <Monitor size={18} /> Prompts de Site
+            <Monitor size={18} /> Treinamento IA
           </button>
 
           <button 
@@ -173,11 +193,20 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
         <div className="p-4 border-t border-white/5 bg-black/20">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-purple-600/30 border border-purple-500/50 flex items-center justify-center text-purple-300 font-bold text-sm">
-              VN
+              <User size={18} />
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="text-sm font-bold text-white truncate">Vitor Nogueira</p>
-              <p className="text-xs text-gray-500 truncate">vitor@example.com</p>
+              <p className="text-sm font-bold text-white truncate">
+                {(() => {
+                  let uname = 'Usuário';
+                  try {
+                    const stored = localStorage.getItem('sdr_user');
+                    if (stored) uname = JSON.parse(atob(stored)).username || 'Usuário';
+                  } catch(e) {}
+                  return uname.toLowerCase() === 'vitor batista' ? 'Administrador' : uname;
+                })()}
+              </p>
+              <p className="text-xs text-gray-500 truncate">{userRole === 'admin' ? 'Admin' : 'Parceiro'}</p>
             </div>
           </div>
           <button onClick={handleLogout} className="mt-4 w-full flex items-center gap-2 text-xs font-bold text-red-400 hover:text-red-300 transition-colors">
@@ -191,6 +220,9 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
         {activeTab === 'dashboard' && <LeadScannerDashboard setActiveTab={setActiveTab} planInfo={planInfo} />}
         {activeTab === 'nova_analise' && <LeadScannerAnalysis setActiveTab={setActiveTab} />}
         {activeTab === 'leads_qualificados' && <LeadScannerLeads setActiveTab={setActiveTab} userTier={userTier} />}
+        {activeTab === 'site_builder' && <SiteBuilderView />}
+        {activeTab === 'prospeccao_internacional' && <LeadScannerInternational />}
+        {activeTab === 'gringa_crm' && <LeadScannerGringaLeads setActiveTab={setActiveTab} userTier={userTier} />}
         {activeTab === 'historico' && <LeadScannerHistory />}
         {activeTab === 'mensagens' && <LeadScannerMessages planInfo={planInfo} userTier={userTier} />}
         {activeTab === 'convites' && <LeadScannerInvites />}
@@ -199,7 +231,7 @@ export default function SdrSystem({ userRole, userTier, planInfo, handleLogout }
         {activeTab === 'chat' && <SdrChat />}
         {activeTab === 'captura' && <SdrCapture />}
         {activeTab === 'campanhas' && <SdrCampaign />}
-        {activeTab === 'prompts_site' && <SdrSitePrompts />}
+        {activeTab === 'prompts_site' && <SdrAiTraining />}
         
         {activeTab === 'admin' && <SdrAdmin />}
         {activeTab === 'configuracoes' && <LeadScannerSettings userTier={userTier} />}
@@ -281,41 +313,43 @@ function SdrDashboard() {
       // 1. Fetch WhatsApp Status
       try {
         const resWa = await fetch('/api/whatsapp/status');
-        if (resWa.ok) setWaData(await resWa.json());
-      } catch (e) {
-        console.error("Erro ao buscar status do WhatsApp", e);
-      }
-      
-      // 2. Fetch Leads Database
-      try {
-        const resLeads = await fetch('/api/leads?t=' + Date.now());
-        if (resLeads.ok) {
-          const json = await resLeads.json();
-          if (json.data) {
-            const leads = json.data;
-            setLeadStats({
-              total: leads.length,
-              quentes: leads.filter(l => l.status === 'QUENTE').length,
-              mornos: leads.filter(l => l.status === 'MORNO').length,
-              frios: leads.filter(l => l.status === 'FRIO').length
-            });
-          }
+        if (resWa.ok) {
+          const newWa = await resWa.json();
+          setWaData(prev => (prev?.status === newWa?.status && prev?.qr === newWa?.qr) ? prev : newWa);
         }
-      } catch (e) {
-        console.error("Erro ao buscar leads", e);
-      }
+      } catch (e) {}
+      
+      // 2. Fetch Lightweight Leads Stats (no heavy lead payload)
+      try {
+        const resStats = await fetch('/api/leads/stats');
+        if (resStats.ok) {
+          const stats = await resStats.json();
+          setLeadStats(prev => {
+            if (
+              prev.total === stats.total &&
+              prev.quentes === stats.quentes &&
+              prev.mornos === stats.mornos &&
+              prev.frios === stats.frios
+            ) {
+              return prev; // Mesma referência: React pula re-renderização!
+            }
+            return stats;
+          });
+        }
+      } catch (e) {}
 
       // 3. Fetch Auto-Send Status
       try {
         const resAuto = await fetch('/api/autosend/status');
-        if (resAuto.ok) setAutoSend(await resAuto.json());
-      } catch (e) {
-        console.error("Erro ao buscar status do piloto automático", e);
-      }
+        if (resAuto.ok) {
+          const newAuto = await resAuto.json();
+          setAutoSend(prev => (prev?.enabled === newAuto?.enabled && prev?.sentToday === newAuto?.sentToday) ? prev : newAuto);
+        }
+      } catch (e) {}
     };
     
     fetchData();
-    const interval = setInterval(fetchData, 3000);
+    const interval = setInterval(fetchData, 8000);
     return () => clearInterval(interval);
   }, []);
 
@@ -838,6 +872,7 @@ function SdrCampaign() {
   const [selectedLeads, setSelectedLeads] = useState(new Set());
   const [campaign, setCampaign] = useState({ isRunning: false, total: 0, sent: 0, failed: 0, skipped: 0, currentLead: null });
   const [settings, setSettings] = useState({ delayMin: 45, delayMax: 120, batchSize: 15, batchPause: 600 });
+  const [attachPdf, setAttachPdf] = useState(true);
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState('');
   const [editName, setEditName] = useState('');
@@ -984,7 +1019,7 @@ function SdrCampaign() {
     if (!window.confirm(`Iniciar campanha para ${selected.length} leads com ${activeTemplates.length} templates?\n\nDelay: ${settings.delayMin}-${settings.delayMax}s\nLote: ${settings.batchSize} mensagens\nPausa entre lotes: ${Math.floor(settings.batchPause/60)} min`)) return;
 
     try {
-      const res = await fetch('/api/whatsapp/campaign/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ leads: selected, templates: tpls, ...settings }) });
+      const res = await fetch('/api/whatsapp/campaign/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ leads: selected, templates: tpls, attachPdf, ...settings }) });
       const data = await res.json();
       if (data.error) return alert('Erro: ' + data.error);
       setCampaign({ isRunning: true, total: selected.length, sent: 0, failed: 0, skipped: 0, currentLead: null });
@@ -1134,7 +1169,7 @@ function SdrCampaign() {
                 <div>
                   <label className="text-xs text-muted font-bold mb-2" style={{ display: 'block' }}>🔢 Quantidade de Mensagens Únicas (Validações)</label>
                   <div className="flex gap-2">
-                    {[10, 16, 20, 50].map(c => (
+                    {[10, 25, 50, 100].map(c => (
                       <button
                         key={c}
                         type="button"
@@ -1147,11 +1182,14 @@ function SdrCampaign() {
                     <input 
                       type="number" 
                       value={batchCount} 
-                      onChange={e => setBatchCount(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} 
+                      onChange={e => setBatchCount(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))} 
                       className="bg-black/30 border border-white/10 rounded-lg px-2 text-center text-sm text-white" 
                       style={{ width: '70px' }}
+                      min={1}
+                      max={100}
                     />
                   </div>
+                  <p className="text-[10px] text-gray-500 mt-1">Máximo: 100 variações por geração</p>
                 </div>
               </div>
 
@@ -1202,8 +1240,8 @@ function SdrCampaign() {
               <textarea value={aiModelMessage} onChange={e => setAiModelMessage(e.target.value)} rows={3} placeholder="Sua mensagem modelo..." className="w-full bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 resize-none" />
               <input value={aiVibe} onChange={e => setAiVibe(e.target.value)} placeholder="Direcionamento/Vibe (ex: gere curiosidade sobre delivery)" className="w-full bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500" />
               <div className="flex gap-4 items-center">
-                <label className="text-sm text-gray-400">Quantidade:</label>
-                <input type="number" min="1" max="20" value={aiCount} onChange={e => setAiCount(e.target.value)} className="w-20 bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-1 text-sm text-white focus:outline-none focus:border-indigo-500" />
+                <label className="text-sm text-gray-400">Quantidade (até 100):</label>
+                <input type="number" min="1" max="100" value={aiCount} onChange={e => setAiCount(e.target.value)} className="w-20 bg-black/50 border border-indigo-500/20 rounded-lg px-3 py-1 text-sm text-white focus:outline-none focus:border-indigo-500" />
               </div>
               <div className="flex gap-2 pt-2">
                 <button onClick={handleGenerateVariations} disabled={isGeneratingAi} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-bold flex items-center gap-2 transition-colors">
@@ -1337,6 +1375,26 @@ function SdrCampaign() {
                 <input type="number" value={settings.batchPause} onChange={e => setSettings(s => ({...s, batchPause: +e.target.value}))} className="w-full bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white" />
                 <p className="text-[10px] text-gray-600 mt-1">= {Math.floor(settings.batchPause / 60)} minutos</p>
               </div>
+
+              {/* Anexar PDF */}
+              <div className="pt-3 border-t border-white/10">
+                <label className="flex items-center justify-between cursor-pointer gap-2">
+                  <div>
+                    <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                      📎 Anexar PDF do Site
+                    </p>
+                    <p className="text-[10px] text-gray-400 leading-tight">
+                      Envia a proposta em PDF como anexo para leads com PDF pronto.
+                    </p>
+                  </div>
+                  <input 
+                    type="checkbox" 
+                    checked={attachPdf} 
+                    onChange={e => setAttachPdf(e.target.checked)} 
+                    className="w-4 h-4 rounded accent-emerald-500 cursor-pointer shrink-0" 
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>
@@ -1364,7 +1422,7 @@ function SdrCampaign() {
           ) : (
             <table className="w-full text-left text-sm text-gray-300">
               <thead className="text-xs text-gray-400 uppercase bg-black/20 border-b border-white/5 sticky top-0">
-                <tr><th className="px-4 py-3 w-10"></th><th className="px-4 py-3">Nome</th><th className="px-4 py-3">Nicho</th><th className="px-4 py-3">WhatsApp</th><th className="px-4 py-3">Nota</th></tr>
+                <tr><th className="px-4 py-3 w-10"></th><th className="px-4 py-3">Nome</th><th className="px-4 py-3">Nicho</th><th className="px-4 py-3">WhatsApp</th><th className="px-4 py-3">Status</th></tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {leads
@@ -1377,10 +1435,21 @@ function SdrCampaign() {
                   .map(l => (
                   <tr key={l.id} className={`hover:bg-white/5 transition-colors cursor-pointer ${selectedLeads.has(l.id) ? 'bg-emerald-500/5' : ''}`} onClick={() => toggleLead(l.id)}>
                     <td className="px-4 py-2"><input type="checkbox" checked={selectedLeads.has(l.id)} onChange={() => {}} className="w-4 h-4 rounded" /></td>
-                    <td className="px-4 py-2 font-bold text-white">{l.nome}</td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-white">{l.nome}</span>
+                        {Boolean(l.hasPdf || l.siteStatus === 'SITE_E_PDF_PRONTO' || l.pdfPath) && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                            📄 PDF Pronto
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-2 text-gray-400">{l.nicho}</td>
                     <td className="px-4 py-2 text-gray-400">{l.whatsapp}</td>
-                    <td className="px-4 py-2 text-gray-400">{l.nota || '-'}</td>
+                    <td className="px-4 py-2 text-gray-400">
+                      <span className="text-xs">{l.status || 'NOVO'}</span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1398,6 +1467,8 @@ function SdrAdmin() {
   const [filterStatus, setFilterStatus] = useState('Todos os Status');
   const [loading, setLoading] = useState(true);
   const [isCleaning, setIsCleaning] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 25;
 
   const fetchLeads = async () => {
     try {
@@ -1413,8 +1484,6 @@ function SdrAdmin() {
 
   useEffect(() => {
     fetchLeads();
-    const interval = setInterval(fetchLeads, 10000); // refresh every 10s
-    return () => clearInterval(interval);
   }, []);
 
   const handleClean = async () => {
@@ -1457,6 +1526,11 @@ function SdrAdmin() {
     return matchSearch && matchStatus;
   });
 
+  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
+  const validPage = Math.min(currentPage, totalPages);
+  const startIndex = (validPage - 1) * pageSize;
+  const paginatedLeads = filteredLeads.slice(startIndex, startIndex + pageSize);
+
   const getStatusBadge = (status) => {
     const s = (status || 'FRIO').toUpperCase();
     if (s === 'QUENTE') return <span className="px-2 py-1 bg-orange-500/20 text-orange-400 rounded text-xs font-bold border border-orange-500/20">QUENTE</span>;
@@ -1484,12 +1558,12 @@ function SdrAdmin() {
               type="text" 
               placeholder="Buscar lead..." 
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
               className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 w-full md:w-64" 
             />
             <select 
               value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
+              onChange={e => { setFilterStatus(e.target.value); setCurrentPage(1); }}
               className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 appearance-none"
             >
               <option>Todos os Status</option>
@@ -1524,45 +1598,79 @@ function SdrAdmin() {
               <p className="text-sm mt-1">Use a Extração do Google Maps para popular a base!</p>
             </div>
           ) : (
-            <table className="w-full text-left text-sm text-gray-300">
-              <thead className="text-xs text-gray-400 uppercase bg-black/20 border-b border-white/5">
-                <tr>
-                  <th className="px-6 py-4">Nome do Lead</th>
-                  <th className="px-6 py-4">Empresa / Nicho</th>
-                  <th className="px-6 py-4">Status IA</th>
-                  <th className="px-6 py-4">Telefone</th>
-                  <th className="px-6 py-4">Pontuação</th>
-                  <th className="px-6 py-4 text-right">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5 bg-transparent">
-                {filteredLeads.map((l, i) => (
-                  <tr key={l.id || i} className="hover:bg-white/5 transition-colors group">
-                    <td className="px-6 py-4 font-bold text-white">{l.nome}</td>
-                    <td className="px-6 py-4 text-gray-400">{l.nicho || l.cidade}</td>
-                    <td className="px-6 py-4">{getStatusBadge(l.status)}</td>
-                    <td className="px-6 py-4 text-gray-400">{l.whatsapp}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold w-6">{l.score || 0}</span>
-                        <div className="w-full bg-white/10 h-1.5 rounded-full">
-                          <div className={`${getScoreColor(l.score)} h-1.5 rounded-full`} style={{width: `${Math.min(l.score || 0, 100)}%`}}></div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <button 
-                        onClick={() => handleDelete(l.id || l.whatsapp)}
-                        className="p-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded transition-colors"
-                        title="Excluir lead"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
+            <>
+              <table className="w-full text-left text-sm text-gray-300">
+                <thead className="text-xs text-gray-400 uppercase bg-black/20 border-b border-white/5">
+                  <tr>
+                    <th className="px-6 py-4">Nome do Lead</th>
+                    <th className="px-6 py-4">Empresa / Nicho</th>
+                    <th className="px-6 py-4">Status IA</th>
+                    <th className="px-6 py-4">Telefone</th>
+                    <th className="px-6 py-4">Pontuação</th>
+                    <th className="px-6 py-4 text-right">Ações</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-white/5 bg-transparent">
+                  {paginatedLeads.map((l, i) => (
+                    <tr key={l.id || i} className="hover:bg-white/5 transition-colors group">
+                      <td className="px-6 py-4 font-bold text-white">{l.nome}</td>
+                      <td className="px-6 py-4 text-gray-400">{l.nicho || l.cidade}</td>
+                      <td className="px-6 py-4">{getStatusBadge(l.status)}</td>
+                      <td className="px-6 py-4 text-gray-400">{l.whatsapp}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold w-6">{l.score || 0}</span>
+                          <div className="w-full bg-white/10 h-1.5 rounded-full">
+                            <div className={`${getScoreColor(l.score)} h-1.5 rounded-full`} style={{width: `${Math.min(l.score || 0, 100)}%`}}></div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <button 
+                          onClick={() => handleDelete(l.id || l.whatsapp)}
+                          className="p-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded transition-colors"
+                          title="Excluir lead"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {filteredLeads.length > pageSize && (
+                <div className="p-4 border-t border-white/5 bg-black/40 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="text-gray-400">
+                    Mostrando <span className="text-white font-bold">{startIndex + 1}</span> a{' '}
+                    <span className="text-white font-bold">{Math.min(startIndex + pageSize, filteredLeads.length)}</span> de{' '}
+                    <span className="text-white font-bold">{filteredLeads.length}</span> leads
+                  </span>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                      disabled={validPage === 1}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-gray-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all font-semibold"
+                    >
+                      Anterior
+                    </button>
+
+                    <span className="px-3 py-1 bg-blue-500/15 border border-blue-500/30 rounded-lg text-blue-300 font-bold">
+                      {validPage} / {totalPages}
+                    </span>
+
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                      disabled={validPage >= totalPages}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-gray-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all font-semibold"
+                    >
+                      Próxima
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -1590,7 +1698,7 @@ function SdrScanner() {
       if (data.error) setError(data.error);
       else setResults(data.data);
     } catch (err) {
-      setError('Falha ao conectar com o servidor local. Verifique se o bot está rodando.');
+      setError('Falha ao conectar com o servidor. O backend no Render pode estar hibernando ou demorou a responder. Tente novamente em alguns segundos.');
     }
     setIsScraping(false);
   };

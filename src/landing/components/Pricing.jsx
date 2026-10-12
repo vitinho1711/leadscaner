@@ -80,7 +80,13 @@ export default function Pricing() {
               ))}
             </ul>
             
-            <button className={`w-full py-4 rounded-xl font-bold transition-all ${plan.recommended ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white shadow-[0_0_20px_rgba(217,70,239,0.4)]' : 'bg-purple-900/30 hover:bg-purple-900/50 text-purple-200 border border-purple-500/30'}`}>
+            <button 
+              onClick={() => {
+                const q = window.location.search || '';
+                window.location.href = '/login' + q;
+              }}
+              className={`w-full py-4 rounded-xl font-bold transition-all ${plan.recommended ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white shadow-[0_0_20px_rgba(217,70,239,0.4)]' : 'bg-purple-900/30 hover:bg-purple-900/50 text-purple-200 border border-purple-500/30'}`}
+            >
               {plan.cta}
             </button>
           </motion.div>

@@ -24,7 +24,13 @@ export default function CtaFinal() {
             O tempo que você passou lendo esta página é o tempo que a nossa Inteligência Artificial levaria para encontrar e abordar 50 novas empresas para você.
           </p>
           
-          <button onClick={() => window.location.href='/register'} className="btn-primary text-lg !py-4 !px-8 group">
+          <button 
+            onClick={() => {
+              const q = window.location.search || '';
+              window.location.href = '/login' + q;
+            }} 
+            className="btn-primary text-lg !py-4 !px-8 group"
+          >
             Automatizar Minhas Vendas Agora
             <ArrowRight size={24} className="group-hover:translate-x-1 transition-transform" />
           </button>

@@ -9,7 +9,8 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
   // === BUSCA AUTOMÁTICA ===
   const [nicho, setNicho] = useState('');
   const [cidade, setCidade] = useState('');
-  const [limite, setLimite] = useState(100);
+  const [limite, setLimite] = useState(20);
+  const [onlyWithoutSite, setOnlyWithoutSite] = useState(true);
   const [isSearching, setIsSearching] = useState(false);
   const [searchResults, setSearchResults] = useState([]);
   const [searchError, setSearchError] = useState('');
@@ -40,23 +41,42 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
     setSearchResults([]);
     setSelectedIds(new Set());
     try {
-      const res = await fetch(`/api/scrape?query=${encodeURIComponent(nicho)}&location=${encodeURIComponent(cidade)}&limit=${limite}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 65000); // 65s timeout para absorver cold starts do Render
+      const res = await fetch(`/api/scrape?query=${encodeURIComponent(nicho)}&location=${encodeURIComponent(cidade)}&limit=${limite}&onlyWithoutSite=${onlyWithoutSite}`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        if (res.status === 502 || res.status === 504) {
+          throw new Error('O servidor backend no Render estava hibernando ou demorou para inicializar. Aguarde 20 segundos e tente buscar novamente.');
+        }
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Erro de resposta do servidor (${res.status}).`);
+      }
+
       const json = await res.json();
       if (json.error) {
         setSearchError(json.error);
       } else {
-        setSearchResults(json.data || []);
+        const found = json.data || [];
+        setSearchResults(found);
         
-        const addedIds = (json.data || []).map(l => l.id).filter(Boolean);
+        const addedIds = found.map(l => l.id).filter(Boolean);
         if (addedIds.length > 0) {
           sessionStorage.setItem('preSelectedLeads', JSON.stringify(addedIds));
         }
 
-        alert(`✅ Busca concluída! Encontrados ${json.data ? json.data.length : 0} leads.`);
+        alert(`✅ Busca concluída! Encontrados ${found.length} leads.`);
         if (setActiveTab) setActiveTab('campanhas');
       }
     } catch (e) {
-      setSearchError('Erro ao conectar com o servidor. Certifique-se de que o backend está rodando.');
+      if (e.name === 'AbortError') {
+        setSearchError('A busca demorou mais que o esperado. O servidor pode estar acordando da hibernação. Tente novamente em alguns segundos.');
+      } else {
+        setSearchError(e.message || 'Erro ao conectar com o servidor. Verifique sua conexão e tente novamente.');
+      }
     }
     setIsSearching(false);
   };
@@ -264,11 +284,11 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-gray-400">Nicho / Segmento</label>
                   <div className="relative">
-                    <Bot className="absolute left-3 top-1/2 -translate-y-1/2 text-purple-400" size={16} />
+                    <Bot className="absolute left-3.5 top-1/2 -translate-y-1/2 text-purple-400 pointer-events-none" size={18} />
                     <input 
                       type="text" value={nicho} onChange={e => setNicho(e.target.value)} 
                       placeholder="Ex: Restaurante japonês"
-                      className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:border-purple-500/50 placeholder:text-gray-600"
+                      className="w-full pl-11 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:border-purple-500/50 placeholder:text-gray-600"
                     />
                   </div>
                 </div>
@@ -276,11 +296,11 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-gray-400">Cidade / Região</label>
                   <div className="relative">
-                    <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-400" size={16} />
+                    <MapPin className="absolute left-3.5 top-1/2 -translate-y-1/2 text-blue-400 pointer-events-none" size={18} />
                     <input 
                       type="text" value={cidade} onChange={e => setCidade(e.target.value)}
                       placeholder="Ex: Belo Horizonte"
-                      className="w-full pl-10 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500/50 placeholder:text-gray-600"
+                      className="w-full pl-11 pr-4 py-3 bg-black/50 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500/50 placeholder:text-gray-600"
                     />
                   </div>
                 </div>
@@ -292,6 +312,31 @@ export default function LeadScannerAnalysis({ setActiveTab }) {
                     className="w-full px-4 py-3 bg-black/50 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:border-purple-500/50"
                   />
                 </div>
+              </div>
+
+              {/* Filtro Rígido de Leads Sem Site */}
+              <div className="flex items-center justify-between p-4 bg-purple-500/10 border border-purple-500/20 rounded-xl">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0">
+                    <Zap size={20} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-white flex items-center gap-2">
+                      Filtro Cirúrgico: Trazer Apenas Negócios SEM Site Oficial
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-bold">Recomendado</span>
+                    </p>
+                    <p className="text-xs text-gray-400">Descarta automaticamente quem tem site próprio. Traz apenas quem não tem site ou usa Instagram/Facebook/Linktree.</p>
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer shrink-0 ml-4">
+                  <input 
+                    type="checkbox" 
+                    checked={onlyWithoutSite} 
+                    onChange={e => setOnlyWithoutSite(e.target.checked)} 
+                    className="sr-only peer"
+                  />
+                  <div className="w-12 h-6 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                </label>
               </div>
 
               <button onClick={handleSearch} disabled={isSearching} className="w-full py-4 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold text-sm flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(124,58,237,0.3)] transition-all">

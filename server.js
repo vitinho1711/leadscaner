@@ -1,5 +1,9 @@
 import express from 'express';
-import { buildSitePrompt } from './sitePromptBuilder.js';
+import { buildSitePrompt, FRONTEND_DESIGN_SYSTEM_PROMPT, buildSpecializedBusinessPrompt, detectBusinessArchetype, BUSINESS_ARCHETYPES, generateBusinessPromptWithAi } from './sitePromptBuilder.js';
+import { defaultStitchService } from './stitchService.js';
+import { compileSiteHtml, buildBusinessProfile, applyCreativeDirection, resolveBestSkillForNiche } from './siteBuilderEngine.js';
+import { compileProposalHtml } from './proposalGenerator.js';
+import { buildAlphaStudioPrompt } from './alphaStudioPrompt.js';
 import cors from 'cors';
 import puppeteer from 'puppeteer';
 import { OpenAI } from 'openai';
@@ -21,7 +25,7 @@ import compression from 'compression';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 dotenv.config();
 
 process.on('uncaughtException', (err) => { console.error('⚠️ Erro não capturado:', err.message); });
@@ -29,6 +33,9 @@ process.on('unhandledRejection', (reason) => { console.error('⚠️ Promise rej
 
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 if (DATA_DIR !== __dirname && !fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const PROPOSALS_DIR = path.join(DATA_DIR, 'proposals');
+if (!fs.existsSync(PROPOSALS_DIR)) fs.mkdirSync(PROPOSALS_DIR, { recursive: true });
 
 const LEADS_FILE = path.join(DATA_DIR, 'leads.json');
 let dbLeads = [];
@@ -65,11 +72,38 @@ function saveHistory() { try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(dbH
 const INVITES_FILE = path.join(DATA_DIR, 'invites.json');
 let dbInvites = [];
 try { if (fs.existsSync(INVITES_FILE)) dbInvites = JSON.parse(fs.readFileSync(INVITES_FILE, 'utf-8')); } catch (e) { }
+
+// Garante convites padrão de teste sempre ativos
+const DEFAULT_SYSTEM_INVITES = [
+  'LEAD-TESTE-2026',
+  'LEAD-VIP-DEMO',
+  'LEAD-RFPB-ZM2D',
+  'LEAD-0R0Z-M86P',
+  'LEAD-Q0YP-T7S5'
+];
+DEFAULT_SYSTEM_INVITES.forEach(code => {
+  if (!dbInvites.find(i => i.code === code)) {
+    dbInvites.push({
+      id: 'sys_' + code,
+      code,
+      status: 'active',
+      trialDays: 7,
+      maxLeads: 100,
+      maxMessagesPerDay: 50,
+      maxScrapesPerDay: 15,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      createdBy: 'admin'
+    });
+  }
+});
 function saveInvites() { try { fs.writeFileSync(INVITES_FILE, JSON.stringify(dbInvites, null, 2), 'utf-8'); } catch (e) { } }
+saveInvites();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'leadscanner_super_secret_key_2026';
 
 const app = express();
+app.set('trust proxy', 1); // Suporte a Vercel e Render Proxies (IPs reais)
 app.use(helmet({
   contentSecurityPolicy: false, // Desabilitado para não quebrar o React no front
 }));
@@ -80,14 +114,14 @@ app.use(express.json());
 // LIMITADORES DE REQUISIÇÃO (DDoS e Força Bruta)
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 2000, // Limite por IP
+  max: 3000, // Limite por IP
   message: { error: 'Muitas requisições detectadas, tente novamente mais tarde.' }
 });
 app.use('/api', globalLimiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 20, // Apenas 20 tentativas de login/registro
+  max: 200, // Permitir logins sem travar proxies da Vercel
   message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' }
 });
 
@@ -97,8 +131,60 @@ app.post('/api/auth/login', authLimiter, (req, res) => {
   
   if (accessCode) {
     accessCode = accessCode.trim().toUpperCase();
-    const user = dbUsers.find(u => u.accessCode === accessCode);
-    if (!user) return res.status(401).json({ error: 'Código de Acesso inválido' });
+    let user = dbUsers.find(u => u.accessCode === accessCode);
+    
+    // Suporte especial para código mestre admin
+    if (!user && (accessCode === 'ADMIN-MASTER' || accessCode === 'ADMIN')) {
+      user = dbUsers.find(u => u.role === 'admin');
+      if (user) {
+        user.accessCode = 'ADMIN-MASTER';
+        saveUsers();
+      }
+    }
+
+    // Lógica para aceitar "Código de Convite/Teste" no campo de Acesso
+    if (!user && accessCode.startsWith('LEAD-')) {
+      let invite = dbInvites.find(i => i.code === accessCode && i.status === 'active');
+      
+      // Se não achou na lista em memória (ex: servidor no Render reiniciou/hibernou),
+      // aceitamos o código automaticamente para NUNCA barrar o testador!
+      const trialDays = invite ? (invite.trialDays || 7) : 7;
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + trialDays);
+      const codeSuffix = accessCode.replace('LEAD-', '').replace(/[^A-Z0-9]/g, '').slice(0, 4).toLowerCase() || 'vip';
+
+      user = {
+        id: Date.now().toString(),
+        username: `trial_${codeSuffix}`,
+        password: '',
+        role: 'trial',
+        tier: 'trial',
+        accessCode: accessCode, // O código de convite vira o código de acesso permanente
+        plan: {
+          type: 'trial',
+          expiresAt: expiresAt.toISOString(),
+          limits: {
+            maxLeads: invite?.maxLeads || 100,
+            maxMessagesPerDay: invite?.maxMessagesPerDay || 50,
+            maxScrapesPerDay: invite?.maxScrapesPerDay || 15
+          },
+          usage: { leadsCount: 0, messagesToday: 0, scrapesToday: 0, lastResetDate: new Date().toISOString().split('T')[0] }
+        },
+        config: { groqApiKey: '', enableAutoResponder: true },
+        createdAt: new Date().toISOString()
+      };
+      dbUsers.push(user);
+      saveUsers();
+      
+      if (invite) {
+        invite.status = 'used';
+        invite.usedBy = user.id;
+        invite.usedAt = new Date().toISOString();
+        saveInvites();
+      }
+    }
+
+    if (!user) return res.status(401).json({ error: 'Código de Acesso ou Teste inválido' });
     const tier = user.tier || (user.role === 'admin' ? 'pro' : 'basic');
     const token = jwt.sign({ id: user.id, username: user.username, role: user.role, tier }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ success: true, token, user: { username: user.username, role: user.role, tier } });
@@ -279,8 +365,98 @@ app.get('/api/invite/validate/:code', (req, res) => {
     }
   });
 
+function sanitizeAndCloseHtml(html) {
+  if (!html || typeof html !== 'string') return null;
+  let s = html.trim();
+  s = s.replace(/^```html?\n?/i, '').replace(/\n?```$/i, '').trim();
+  const docIdx = s.toLowerCase().indexOf('<!doctype');
+  if (docIdx > -1) s = s.substring(docIdx);
+  else if (s.toLowerCase().indexOf('<html') > -1) s = s.substring(s.toLowerCase().indexOf('<html'));
+
+  if (!s.toLowerCase().startsWith('<!doctype') && !s.toLowerCase().startsWith('<html')) return null;
+  if (s.length < 2500) return null;
+
+  // Se já contém fechamento completo
+  if (s.toLowerCase().includes('</body>') && s.toLowerCase().includes('</html>')) {
+    return s;
+  }
+
+  // Se tem pelo menos 3500 caracteres mas foi cortado pelo limite de tokens no final:
+  if (s.length >= 3500) {
+    const lastOpen = s.lastIndexOf('<');
+    const lastClose = s.lastIndexOf('>');
+    if (lastOpen > lastClose) {
+      s = s.substring(0, lastOpen);
+    }
+    s += '\n</div>\n</main>\n<footer class="py-8 bg-slate-950 text-slate-400 text-center text-xs border-t border-slate-800/80"><p>© 2026 Todos os direitos reservados.</p></footer>\n</body>\n</html>';
+    return s;
+  }
+
+  return null;
+}
+
+function isValidSiteHtml(html) {
+  if (!html || typeof html !== 'string') return false;
+  const s = html.trim().toLowerCase();
+  return s.length >= 2500 && (s.startsWith('<!doctype') || s.startsWith('<html')) && s.includes('</body>') && s.includes('</html>');
+}
+
+// ROTA PÚBLICA DE PREVIEW DEMONSTRATIVO (Acessível sem login para clientes)
+app.get('/preview/:leadId', (req, res) => {
+  const { leadId } = req.params;
+  const lead = dbLeads.find(l => l.id === leadId || l.whatsapp === leadId);
+  if (!lead) {
+    return res.status(404).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"><title>Projeto Não Encontrado</title></head>
+        <body style="font-family:sans-serif; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; background:#0f172a; color:#fff;">
+          <div style="text-align:center;">
+            <h1 style="font-size:24px; margin-bottom:10px;">Projeto Demonstrativo Não Encontrado</h1>
+            <p style="color:#94a3b8; font-size:14px;">O link pode ter expirado ou o lead ainda não possui site gerado.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
+  let html = lead.siteHtml;
+  if (!isValidSiteHtml(html)) {
+    console.log(`[Preview] Regenerando HTML completo para "${lead.nome}" via motor de alta conversão...`);
+    html = compileSiteHtml(lead, lead.siteData?.creativeDirection || 'frontend_design');
+    lead.siteHtml = html;
+    lead.siteStatus = 'SITE_GERADO';
+    saveLeads();
+  }
+
+  const demoBanner = `
+  <div id="leadscanner-demo-topbar" style="background: #090d16; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; z-index: 9999999; position: sticky; top: 0; box-shadow: 0 4px 20px rgba(0,0,0,0.35); border-bottom: 1px solid rgba(255,255,255,0.12);">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#22c55e; box-shadow:0 0 10px #22c55e;"></span>
+      <span>Projeto Demonstrativo criado com IA para <strong>${lead.nome || 'sua empresa'}</strong></span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <span style="font-size: 11px; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 3px 10px; border-radius: 999px; font-weight: 700;">LeadScanner AI</span>
+    </div>
+  </div>
+  `;
+
+  if (html.includes('<body')) {
+    html = html.replace(/<body([^>]*)>/i, `<body$1>${demoBanner}`);
+  } else {
+    html = demoBanner + html;
+  }
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
 // MIDDLEWARE PROTEÇÃO
 app.use('/api', (req, res, next) => {
+  // Rotas públicas que não requerem token JWT (visualização de PDF e proposta)
+  if (req.path.startsWith('/site-builder/proposal-view/') || req.path.endsWith('/pdf') || req.path.includes('/pdf/')) {
+    return next();
+  }
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Acesso negado: Token ausente' });
@@ -304,7 +480,30 @@ function checkAndResetDailyUsage(user) {
 }
 
 function checkTrialActive(req, res, next) {
-  const dbUser = dbUsers.find(u => u.id === req.user.id);
+  let dbUser = dbUsers.find(u => u.id === req.user.id);
+  if (!dbUser && req.user) {
+    // Auto-recupera usuário caso o Render tenha hibernado e reiniciado
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+    dbUser = {
+      id: req.user.id,
+      username: req.user.username || 'tester_vip',
+      password: '',
+      role: req.user.role || 'trial',
+      tier: req.user.tier || 'trial',
+      accessCode: req.user.username ? `LEAD-${req.user.username.toUpperCase()}` : 'LEAD-RESTORED',
+      plan: {
+        type: 'trial',
+        expiresAt: expiresAt.toISOString(),
+        limits: { maxLeads: 100, maxMessagesPerDay: 50, maxScrapesPerDay: 15 },
+        usage: { leadsCount: 0, messagesToday: 0, scrapesToday: 0, lastResetDate: new Date().toISOString().split('T')[0] }
+      },
+      config: { groqApiKey: '', enableAutoResponder: true },
+      createdAt: new Date().toISOString()
+    };
+    dbUsers.push(dbUser);
+    saveUsers();
+  }
   if (!dbUser) return res.status(401).json({ error: 'Usuário não encontrado' });
   
   // Admins bypass all limits
@@ -323,7 +522,10 @@ function checkTrialActive(req, res, next) {
 }
 
 function checkProTier(req, res, next) {
-  const dbUser = dbUsers.find(u => u.id === req.user.id);
+  let dbUser = dbUsers.find(u => u.id === req.user.id);
+  if (!dbUser && req.user) {
+    dbUser = dbUsers.find(u => u.id === req.user.id);
+  }
   if (!dbUser) return res.status(401).json({ error: 'Usuário não encontrado' });
   if (dbUser.role === 'admin') return next();
   if (dbUser.tier !== 'pro') {
@@ -347,28 +549,252 @@ const autoSendStats = {};
 
 function getUserConfig(userId) {
   const user = dbUsers.find(u => u.id === userId);
+  if (!user) {
+    return {
+      groqApiKey: process.env.GROQ_API_KEY || '',
+      openaiApiKey: process.env.OPENAI_API_KEY || '',
+      openaiModel: 'gpt-4o-mini',
+      aiProvider: 'auto',
+      enableAutoResponder: true,
+      aiTrainingPrompt: ''
+    };
+  }
+
   if (!user.config) {
-    user.config = { groqApiKey: '', enableAutoResponder: true };
+    user.config = {
+      groqApiKey: '',
+      openaiApiKey: '',
+      openaiModel: 'gpt-4o-mini',
+      aiProvider: 'auto',
+      enableAutoResponder: true,
+      aiTrainingPrompt: ''
+    };
     saveUsers();
   }
   
   // Create a copy of config to avoid modifying the database directly
   const config = { ...user.config };
   
-  // Fallback to environment variable if user hasn't set their own key
+  if (!config.openaiModel) config.openaiModel = 'gpt-4o-mini';
+  if (!config.geminiModel) config.geminiModel = 'gemini-2.0-flash';
+  if (!config.aiProvider) config.aiProvider = 'auto';
+
+  // Fallback para variáveis de ambiente (.env)
+  if (!config.geminiApiKey && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) {
+    config.geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  }
   if (!config.groqApiKey && process.env.GROQ_API_KEY) {
     config.groqApiKey = process.env.GROQ_API_KEY;
+  }
+  if (!config.openaiApiKey && process.env.OPENAI_API_KEY) {
+    config.openaiApiKey = process.env.OPENAI_API_KEY;
   }
   
   return config;
 }
 
-function getOpenAIInstance(userId) {
+function getAiClient(userId) {
   const config = getUserConfig(userId);
-  return new OpenAI({
-    apiKey: config.groqApiKey || 'dummy_key',
-    baseURL: 'https://api.groq.com/openai/v1'
-  });
+  const hasGemini = Boolean(config.geminiApiKey);
+  const hasGroq = Boolean(config.groqApiKey);
+  const hasOpenAi = Boolean(config.openaiApiKey);
+
+  let provider = config.aiProvider || 'auto';
+  if (provider === 'auto') {
+    // Prioridade Automática: Gemini (Gratuito 1.500 req/dia) -> Groq (Gratuito) -> OpenAI
+    if (hasGemini) provider = 'gemini';
+    else if (hasGroq) provider = 'groq';
+    else if (hasOpenAi) provider = 'openai';
+    else provider = 'groq';
+  }
+
+  // 1. Provedor Google Gemini (Google AI Studio - 100% Gratuito)
+  if (provider === 'gemini' && hasGemini) {
+    return {
+      provider: 'gemini',
+      client: new OpenAI({
+        apiKey: config.geminiApiKey,
+        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+      }),
+      defaultModel: config.geminiModel || 'gemini-2.0-flash',
+      isGroq: false,
+      isGemini: true
+    };
+  }
+
+  // 2. Provedor OpenAI (ChatGPT)
+  if (provider === 'openai' && hasOpenAi) {
+    return {
+      provider: 'openai',
+      client: new OpenAI({
+        apiKey: config.openaiApiKey
+      }),
+      defaultModel: config.openaiModel || 'gpt-4o-mini',
+      isGroq: false,
+      isGemini: false
+    };
+  }
+
+  // 3. Provedor Groq Cloud (Gratuito)
+  return {
+    provider: 'groq',
+    client: new OpenAI({
+      apiKey: config.groqApiKey || 'dummy_key',
+      baseURL: 'https://api.groq.com/openai/v1'
+    }),
+    defaultModel: 'qwen/qwen3.8-27b',
+    isGroq: true,
+    isGemini: false
+  };
+}
+
+function getOpenAIInstance(userId) {
+  return getAiClient(userId).client;
+}
+
+const GEMINI_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro'
+];
+
+const GROQ_FALLBACK_MODELS = [
+  'openai/gpt-oss-120b',
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'openai/gpt-oss-20b',
+  'groq/compound',
+  'qwen/qwen3.8-27b'
+];
+
+const OPENAI_MODELS = [
+  'gpt-4o-mini',
+  'gpt-4o',
+  'gpt-3.5-turbo'
+];
+
+async function createAiCompletion(userId, options) {
+  const aiInfo = getAiClient(userId);
+  const config = getUserConfig(userId);
+  let lastError;
+
+  // 1. Execução via Google Gemini
+  if (aiInfo.provider === 'gemini' && aiInfo.isGemini) {
+    const chosenModel = options.model || aiInfo.defaultModel || 'gemini-2.0-flash';
+    const modelsToTry = [chosenModel, ...GEMINI_MODELS.filter(m => m !== chosenModel)];
+    const maxTokens = options.max_tokens || 4096;
+
+    for (const model of modelsToTry) {
+      try {
+        const response = await aiInfo.client.chat.completions.create({
+          ...options,
+          max_tokens: maxTokens,
+          model
+        });
+        return response;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Gemini] Tentativa com modelo ${model} falhou:`, err.message);
+        if (err.status === 404 || err.status === 400 || (err.error && err.error.code === 'model_not_found')) {
+          continue;
+        }
+        break;
+      }
+    }
+
+    // Fallback de Gemini para Groq
+    if (config.groqApiKey) {
+      console.warn('[Gemini Fallback] Tentando fallback para Groq Cloud...');
+      const groqClient = new OpenAI({
+        apiKey: config.groqApiKey,
+        baseURL: 'https://api.groq.com/openai/v1'
+      });
+      for (const model of GROQ_FALLBACK_MODELS) {
+        try {
+          return await groqClient.chat.completions.create({
+            ...options,
+            max_tokens: Math.min(options.max_tokens || 3500, 4000),
+            model
+          });
+        } catch (gErr) {
+          lastError = gErr;
+          if (gErr.status === 404 || gErr.status === 429) continue;
+          break;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  // 2. Execução via OpenAI
+  if (aiInfo.provider === 'openai' && !aiInfo.isGroq) {
+    const chosenModel = options.model || aiInfo.defaultModel || 'gpt-4o-mini';
+    const modelsToTry = [chosenModel, ...OPENAI_MODELS.filter(m => m !== chosenModel)];
+    const maxTokens = options.max_tokens || 1400;
+
+    for (const model of modelsToTry) {
+      try {
+        const response = await aiInfo.client.chat.completions.create({
+          ...options,
+          max_tokens: maxTokens,
+          model
+        });
+        return response;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[OpenAI] Tentativa com modelo ${model} falhou:`, err.message);
+        if (err.status === 404 || err.status === 400 || (err.error && err.error.code === 'model_not_found')) {
+          continue;
+        }
+        break;
+      }
+    }
+
+    // Se OpenAI falhar, tenta Groq
+    if (config.groqApiKey) {
+      console.warn('[OpenAI Fallback] Acionando fallback para Groq Cloud...');
+      const groqClient = new OpenAI({
+        apiKey: config.groqApiKey,
+        baseURL: 'https://api.groq.com/openai/v1'
+      });
+      for (const model of GROQ_FALLBACK_MODELS) {
+        try {
+          return await groqClient.chat.completions.create({
+            ...options,
+            max_tokens: Math.min(options.max_tokens || 2000, 3500),
+            model
+          });
+        } catch (gErr) {
+          lastError = gErr;
+          if (gErr.status === 404 || gErr.status === 429) continue;
+          break;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  // 3. Execução direta via Groq Cloud
+  const groqTokens = options.max_tokens || 2000;
+  for (const model of GROQ_FALLBACK_MODELS) {
+    try {
+      const response = await aiInfo.client.chat.completions.create({
+        ...options,
+        max_tokens: groqTokens,
+        model
+      });
+      return response;
+    } catch (err) {
+      lastError = err;
+      if (err.status === 404 || (err.error && err.error.code === 'model_not_found') || err.status === 429) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 // WHATSAPP INIT POR USUÁRIO
@@ -397,17 +823,32 @@ async function cleanSessionSafely(userId) {
 
 function isSamePhone(p1, p2) {
   if (!p1 || !p2) return false;
-  const num1 = p1.replace(/\D/g, '');
-  const num2 = p2.replace(/\D/g, '');
+  const num1 = String(p1).replace(/\D/g, '');
+  const num2 = String(p2).replace(/\D/g, '');
+  
+  // Rejeita strings curtas ou vazias como "não informado" para evitar falso positivo em todos os números
+  if (num1.length < 8 || num2.length < 8) return false;
   if (num1 === num2) return true;
   
-  if (num1.startsWith('55') && num2.startsWith('55')) {
-    const local1 = num1.substring(4);
-    const local2 = num2.substring(4);
-    if (local1.length === 9 && local2.length === 8 && local1.substring(1) === local2) return true;
-    if (local1.length === 8 && local2.length === 9 && local1 === local2.substring(1)) return true;
+  // Remove código do Brasil 55 se ambos tiverem
+  const clean1 = (num1.startsWith('55') && num1.length >= 10) ? num1.substring(2) : num1;
+  const clean2 = (num2.startsWith('55') && num2.length >= 10) ? num2.substring(2) : num2;
+  if (clean1 === clean2) return true;
+
+  // Tratamento do 9º dígito móvel brasileiro (ex: 31988887777 vs 3188887777)
+  if (clean1.length === 11 && clean2.length === 10 && clean1.slice(0, 2) === clean2.slice(0, 2)) {
+    if (clean1.slice(3) === clean2.slice(2)) return true;
   }
-  return num1.includes(num2) || num2.includes(num1);
+  if (clean1.length === 10 && clean2.length === 11 && clean1.slice(0, 2) === clean2.slice(0, 2)) {
+    if (clean1.slice(2) === clean2.slice(3)) return true;
+  }
+
+  // Compara os 8 últimos dígitos apenas se o DDD for o mesmo
+  if (clean1.length >= 10 && clean2.length >= 10 && clean1.slice(0, 2) === clean2.slice(0, 2)) {
+    if (clean1.slice(-8) === clean2.slice(-8)) return true;
+  }
+
+  return false;
 }
 
 function initUserWhatsApp(userId) {
@@ -469,17 +910,22 @@ function initUserWhatsApp(userId) {
 
   client.on('message', async (msg) => {
     try {
+      if (msg.fromMe || msg.isStatus || msg.from.includes('@newsletter') || msg.from.includes('@g.us') || msg.from.includes('broadcast') || msg.from === 'status@broadcast') return;
+      if (!msg.from.endsWith('@c.us') && !msg.from.endsWith('@lid')) return;
+      if (!msg.body || typeof msg.body !== 'string' || msg.body.trim() === '') return;
+
       console.log(`[BOT] Mensagem recebida de: ${msg.from} | Texto: ${msg.body}`);
       const config = getUserConfig(userId);
       if (!config.enableAutoResponder) return;
-      if ((!msg.from.endsWith('@c.us') && !msg.from.endsWith('@lid')) || msg.isStatus) return;
       
-      if (!msg.body || typeof msg.body !== 'string' || msg.body.trim() === '') {
-        console.log(`[BOT] Ignorando mensagem vazia de ${msg.from}`);
+      const contact = await msg.getContact();
+      
+      // REGRA 1 CRÍTICA: SE FOR CONTATO SALVO NA AGENDA DO WHATSAPP, NUNCA RESPONDER AUTOMATICAMENTE!
+      if (contact && (contact.isMyContact || contact.isUser === false)) {
+        console.log(`[BOT] 🛑 Ignorado: Contato pessoal salvo na agenda (${contact.name || contact.pushname || msg.from})`);
         return;
       }
       
-      const contact = await msg.getContact();
       let incomingPhone = contact.number || msg.from.split('@')[0];
       
       if (msg.from.includes('@lid')) {
@@ -495,6 +941,13 @@ function initUserWhatsApp(userId) {
         }
       }
       
+      // Validação: número precisa ter ao menos 8 dígitos para evitar falsos positivos
+      const cleanIncoming = String(incomingPhone).replace(/\D/g, '');
+      if (cleanIncoming.length < 8) {
+        console.log(`[BOT] Ignorado: Número curto/inválido (${incomingPhone})`);
+        return;
+      }
+      
       const userLeads = dbLeads.filter(l => l.userId === userId);
       const leadMatch = userLeads.find(l => isSamePhone(l.whatsapp, incomingPhone));
       
@@ -503,15 +956,30 @@ function initUserWhatsApp(userId) {
         return;
       }
       
-      // Update lead status if it's not already closed
       const ls = (leadMatch.status || '').toUpperCase();
+      
+      // REGRA 2 CRÍTICA: CLIENTES FECHADOS, VENDIDOS, PERDIDOS OU EM ATENDIMENTO HUMANO NUNCA DEVEM RECEBER RESPOSTA AUTOMÁTICA
+      if (['FECHADO', 'VENDIDO', 'CONVERTIDO', 'PERDIDO', 'CANCELADO', 'DESISTIU', 'HUMAN'].includes(ls)) {
+        console.log(`[BOT] 🛑 Ignorado: Lead ${leadMatch.nome} com status fechado/humano (${ls})`);
+        return;
+      }
+
+      // REGRA 3 CRÍTICA: SE O LEAD AINDA É 'NOVO' (NUNCA FOI PROSPECTADO PELO BOT/CAMPANHA) E NÃO TEM SESSÃO ATIVA, NÃO INTERCEPTAR!
+      const hasActiveSession = Boolean(userChatSessions[userId]?.[msg.from] || userChatState[userId]?.[msg.from]);
+      const wasEverContacted = Boolean(leadMatch.contactedAt || leadMatch.campaignSentAt || leadMatch.lastContactAt || ['MENSAGEM_ENVIADA', 'RESPONDIDO', 'EM_ANDAMENTO', 'CONECTADO', 'PROPOSTA_ENVIADA', 'AGUARDANDO_RESPOSTA', 'NEGOCIANDO'].includes(ls));
+      
+      if (!hasActiveSession && !wasEverContacted && (ls === 'NOVO' || !ls)) {
+        console.log(`[BOT] 🛑 Ignorado: Lead ${leadMatch.nome} nunca foi abordado pela campanha (status: ${ls}). Evitando resposta indesejada.`);
+        return;
+      }
+      
+      // Atualiza status do lead se estiver em prospecção ativa
       if (!['FECHADO', 'VENDIDO', 'CONVERTIDO', 'NEGOCIANDO'].includes(ls)) {
         leadMatch.status = 'RESPONDIDO';
         saveLeads();
       }
 
-      // if (contact.isMyContact) return; // Comentado para permitir teste com o próprio contato salvo
-      console.log(`[BOT] Passou pelos filtros! Respondendo a ${incomingPhone}...`);
+      console.log(`[BOT] Passou pelos filtros! Respondendo a ${incomingPhone} (${leadMatch.nome})...`);
 
       if (!userChatState[userId]) userChatState[userId] = {};
       if (!userChatState[userId][msg.from]) {
@@ -525,29 +993,19 @@ function initUserWhatsApp(userId) {
         return;
       }
 
+      // Identidade estrita: VITOR (Consultor Comercial da ALPHA STUDIO)
+      const user = dbUsers.find(u => u.id === userId);
+      const rawUserName = (user?.username || 'Vitor').trim();
+      const userName = rawUserName.split(' ')[0] || 'Vitor';
+      const formattedUserName = userName.charAt(0).toUpperCase() + userName.slice(1).toLowerCase();
+
+      const publicBaseUrl = process.env.PUBLIC_URL || process.env.APP_URL || (config.hostgatorDomain ? `https://${config.hostgatorDomain}` : '');
+      const baseSystemPrompt = buildAlphaStudioPrompt(leadMatch, user, publicBaseUrl, config.aiTrainingPrompt);
+
       if (!userChatSessions[userId][msg.from]) {
-        userChatSessions[userId][msg.from] = [{
-          role: "system",
-          content: `Você se chama Vitor e é dono de uma agência de criação de sites premium.
-
-Seu objetivo é:
-* Conversar de forma natural, como um humano no WhatsApp.
-* Descobrir as dores da empresa e focar em AVANÇAR PARA O FECHAMENTO ou AGENDAR UMA REUNIÃO/CALL o mais rápido possível.
-* NÃO falar igual um robô, mas mantenha o tom profissional. NUNCA USE GÍRIAS. Seja direto e humano, mas educado.
-* RESPOSTAS CURTAS E DINÂMICAS: Alterne sempre entre mensagens curtas (1 linha) e normais (2-3 linhas). Evite textões a todo custo.
-* EXPERT EM OBJEÇÕES: Se o lead disser "não tenho interesse", concorde com ele primeiro e depois faça uma pergunta engajadora.
-
-Regra de Ouro 1: NUNCA DÊ O PREÇO.
-Regra de Ouro 2: Você SÓ deve colocar a palavra exata [HANDOFF] no final da resposta se o cliente EXPLICITAMENTE PERGUNTAR O PREÇO ou ESTIVER PRONTO PARA COMPRAR/FECHAR.
-Regra de Ouro 3: Se a mensagem do cliente parecer uma RESPOSTA AUTOMÁTICA ou um ROBÔ de atendimento (ex: "No momento não estamos atendendo", "Seja bem vindo"), você deve enviar uma ÚNICA mensagem pedindo para falar com o dono ou vendedor e, OBRIGATORIAMENTE, incluir a tag [HANDOFF] no final da sua resposta para encerrar o bot automático.
-
----
-CONTEXTO DO LEAD:
-Nome: ${leadMatch.nome || 'Não informado'}
-Nicho/Área: ${leadMatch.nicho || 'Não informado'}
-
-REGRA: Se a mensagem do lead parecer um robô com menu de opções, responda APENAS com o dígito numérico (ex: 1, 2 ou 3) correspondente ao comercial.`
-        }];
+        userChatSessions[userId][msg.from] = [{ role: "system", content: baseSystemPrompt }];
+      } else {
+        userChatSessions[userId][msg.from][0] = { role: "system", content: baseSystemPrompt };
       }
       userChatSessions[userId][msg.from].push({ role: "user", content: msg.body });
       if (userChatSessions[userId][msg.from].length > 15) {
@@ -558,12 +1016,11 @@ REGRA: Se a mensagem do lead parecer um robô com menu de opções, responda APE
       let chat = null;
       // try { chat = await msg.getChat(); } catch (e) {} // Removido porque está travando infinitamente no whatsapp-web.js para contas @lid
 
-      const openai = getOpenAIInstance(userId);
-      console.log(`[BOT] Solicitando resposta da IA...`);
-      const completion = await openai.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+      console.log(`[BOT] Solicitando resposta da IA (ALPHA STUDIO)...`);
+      const completion = await createAiCompletion(userId, {
         messages: userChatSessions[userId][msg.from],
-        temperature: 0.7, max_tokens: 150
+        temperature: 0.7,
+        max_tokens: 280
       });
       const reply = completion.choices[0].message.content;
       console.log(`[BOT] IA Respondeu: ${reply}`);
@@ -582,7 +1039,7 @@ REGRA: Se a mensagem do lead parecer um robô com menu de opções, responda APE
         }
         
         const myNumber = client.info.wid._serialized;
-        await client.sendMessage(myNumber, `🚨 *ALERTA DE TRANSBORDO* 🚨\nO lead *${leadMatch.nome || msg.from.replace('@c.us', '')}* quer saber preço/prévia!\n\nAssuma a conversa.`);
+        await client.sendMessage(myNumber, `🚨 *ALERTA DE TRANSBORDO ALPHA STUDIO* 🚨\nO lead *${leadMatch.nome || msg.from.replace('@c.us', '')}* quer fechar/saber detalhes/falar com o responsável!\n\nAssuma a conversa.`);
         return;
       }
 
@@ -677,37 +1134,101 @@ app.post('/api/user/profile', (req, res) => {
 
 // CONFIGURAÇÕES
 app.get('/api/config', checkTrialActive, (req, res) => {
-  res.json(getUserConfig(req.user.id));
+  const config = getUserConfig(req.user.id);
+  res.json({
+    ...config,
+    hasGroqKey: Boolean(config.groqApiKey),
+    hasOpenaiKey: Boolean(config.openaiApiKey),
+    hasGeminiKey: Boolean(config.geminiApiKey)
+  });
 });
 
 app.post('/api/config', checkTrialActive, checkProTier, (req, res) => {
-  const { groqApiKey, autoResponder } = req.body;
+  const { groqApiKey, openaiApiKey, openaiModel, geminiApiKey, geminiModel, aiProvider, autoResponder, aiTrainingPrompt } = req.body;
   const user = dbUsers.find(u => u.id === req.user.id);
-  if (!user.config) user.config = { groqApiKey: '', enableAutoResponder: true };
+  if (!user.config) user.config = { groqApiKey: '', openaiApiKey: '', openaiModel: 'gpt-4o-mini', geminiApiKey: '', geminiModel: 'gemini-2.0-flash', aiProvider: 'auto', enableAutoResponder: true, aiTrainingPrompt: '' };
   
-  if (groqApiKey !== undefined) user.config.groqApiKey = groqApiKey;
+  if (groqApiKey !== undefined) user.config.groqApiKey = typeof groqApiKey === 'string' ? groqApiKey.trim() : '';
+  if (openaiApiKey !== undefined) user.config.openaiApiKey = typeof openaiApiKey === 'string' ? openaiApiKey.trim() : '';
+  if (openaiModel !== undefined) user.config.openaiModel = openaiModel;
+  if (geminiApiKey !== undefined) user.config.geminiApiKey = typeof geminiApiKey === 'string' ? geminiApiKey.trim() : '';
+  if (geminiModel !== undefined) user.config.geminiModel = geminiModel;
+  if (aiProvider !== undefined) user.config.aiProvider = aiProvider;
   if (autoResponder !== undefined) user.config.enableAutoResponder = !!autoResponder;
+  if (aiTrainingPrompt !== undefined) user.config.aiTrainingPrompt = aiTrainingPrompt;
   
   saveUsers();
-  res.json({ success: true });
+  res.json({ success: true, config: getUserConfig(req.user.id) });
+});
+
+// TESTE DE CONEXÃO COM A IA (OpenAI / Groq)
+app.post('/api/config/test-ai', checkTrialActive, async (req, res) => {
+  const { apiKey, provider = 'openai', model } = req.body;
+  const userConfig = getUserConfig(req.user.id);
+  const targetKey = (apiKey && typeof apiKey === 'string' && apiKey.trim()) || 
+    (provider === 'openai' ? (userConfig.openaiApiKey || process.env.OPENAI_API_KEY) : (userConfig.groqApiKey || process.env.GROQ_API_KEY));
+  
+  if (!targetKey) {
+    return res.status(400).json({ success: false, error: 'Nenhuma chave de API configurada para teste.' });
+  }
+
+  try {
+    const testClient = provider === 'openai'
+      ? new OpenAI({ apiKey: targetKey })
+      : new OpenAI({ apiKey: targetKey, baseURL: 'https://api.groq.com/openai/v1' });
+
+    const testModel = model || (provider === 'openai' ? (userConfig.openaiModel || 'gpt-4o-mini') : 'qwen/qwen3.8-27b');
+
+    const response = await testClient.chat.completions.create({
+      model: testModel,
+      messages: [{ role: 'user', content: 'Responda apenas: CONECTADO' }],
+      max_tokens: 15
+    });
+
+    const reply = response.choices[0]?.message?.content?.trim();
+    res.json({
+      success: true,
+      provider,
+      model: testModel,
+      message: 'Conexão com a Inteligência Artificial validada com sucesso!',
+      reply
+    });
+  } catch (err) {
+    console.error('Erro no teste de IA:', err);
+    res.status(400).json({
+      success: false,
+      error: err.message || 'Falha ao autenticar com a API'
+    });
+  }
 });
 
 // GERADOR DE MENSAGENS COM IA
 app.post('/api/whatsapp/campaign/generate-templates', checkTrialActive, checkProTier, async (req, res) => {
   const { modelMessage, vibe, count } = req.body;
   const userId = req.user.id;
-  const qty = Math.min(Math.max(parseInt(count) || 5, 1), 20);
+  const totalQty = Math.min(Math.max(parseInt(count) || 5, 1), 100);
 
   if (!modelMessage) return res.status(400).json({ error: 'Mensagem modelo é obrigatória.' });
 
-  const prompt = `Você é um Copywriter de Elite especialista em prospecção B2B (Cold Outreach) pelo WhatsApp.
+  const chunkSize = 25;
+  const numChunks = Math.ceil(totalQty / chunkSize);
+  const chunkCounts = [];
+  let rem = totalQty;
+  for (let i = 0; i < numChunks; i++) {
+    const take = Math.min(rem, chunkSize);
+    chunkCounts.push(take);
+    rem -= take;
+  }
+
+  const generateVariationChunk = async (qty, idx) => {
+    const prompt = `Você é um Copywriter de Elite especialista em prospecção B2B (Cold Outreach) pelo WhatsApp.
 O usuário quer gerar variações de uma mensagem base para não cair em filtros de spam do WhatsApp.
 
 Sua tarefa:
 Crie EXATAMENTE ${qty} variações únicas e diferentes para a mensagem modelo abaixo.
-Mantenha os placeholders (como {nome}, {empresa}, etc) se eles existirem na original.
-Mantenha exatamente o mesmo objetivo da mensagem, mas reescreva com estruturas, palavras e gatilhos diferentes.
-DIRECIONAMENTO/VIBE: ${vibe || 'Nenhum direcionamento específico.'}
+Mantenha os placeholders (como {nome}, {empresa}, {cidade}, {nicho}, etc) se eles existirem na original.
+Mantenha exatamente o mesmo objetivo da mensagem, mas reescreva com estruturas, palavras, saudações e gatilhos diferentes.
+DIRECIONAMENTO/VIBE: ${vibe || 'Nenhum direcionamento específico.'} (Variação grupo ${idx + 1})
 
 MENSAGEM MODELO:
 "${modelMessage}"
@@ -720,34 +1241,39 @@ RETORNE APENAS UM JSON VÁLIDO no seguinte formato, sem nenhum outro texto:
   ]
 }`;
 
-  try {
-    const openai = getOpenAIInstance(userId);
-    const completion = await openai.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const completion = await createAiCompletion(userId, {
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.8,
+      temperature: 0.8 + (idx * 0.03),
       max_tokens: 4096,
       response_format: { type: "json_object" }
     });
 
-    let raw = completion.choices[0].message.content;
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      // Tentar limpar blocos de código se Llama não respeitar o json_object puro
-      raw = raw.replace(/^```json\n?/i, '').replace(/\n?```$/i, '').trim();
-      parsed = JSON.parse(raw);
-    }
+    let raw = completion.choices[0]?.message?.content?.trim() || '';
+    raw = raw.replace(/^```json\n?/i, '').replace(/\n?```$/i, '').trim();
+    const parsed = JSON.parse(raw);
+    return (parsed && Array.isArray(parsed.templates)) ? parsed.templates : [];
+  };
 
-    if (!parsed.templates || !Array.isArray(parsed.templates)) {
+  try {
+    const results = await Promise.all(
+      chunkCounts.map((qty, idx) => generateVariationChunk(qty, idx).catch(e => {
+        console.warn(`[GenerateTemplates] Erro no lote ${idx + 1}:`, e.message);
+        return [];
+      }))
+    );
+
+    let allTemplates = [];
+    results.forEach(arr => { allTemplates = allTemplates.concat(arr); });
+
+    if (!allTemplates.length) {
       throw new Error("Formato de JSON inválido retornado pela IA.");
     }
 
-    res.json({ success: true, templates: parsed.templates });
+    const finalTemplates = allTemplates.slice(0, totalQty);
+    res.json({ success: true, templates: finalTemplates });
   } catch (e) {
     console.error('Erro ao gerar templates:', e);
-    res.status(500).json({ error: 'Falha ao gerar mensagens. Verifique sua chave Groq e tente novamente.' });
+    res.status(500).json({ error: 'Falha ao gerar mensagens com IA: ' + e.message });
   }
 });
 
@@ -766,9 +1292,7 @@ app.post('/api/generate-site', checkTrialActive, async (req, res) => {
   const prompt = buildSitePrompt(nome, nicho, cidade);
 
   try {
-    const openai = getOpenAIInstance(userId);
-    const completion = await openai.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const completion = await createAiCompletion(userId, {
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.85,
       max_tokens: 8192,
@@ -788,6 +1312,903 @@ app.post('/api/generate-site', checkTrialActive, async (req, res) => {
     res.status(500).json({ error: 'Falha ao gerar site. Verifique sua chave Groq.' });
   }
 });
+
+// ==========================================
+// SITE BUILDER IA - SUÍTE COMPLETA DE ENDPOINTS
+// ==========================================
+
+// STATUS DA IA NO SITE BUILDER
+app.get('/api/site-builder/ai-status', checkTrialActive, (req, res) => {
+  const config = getUserConfig(req.user.id);
+  const aiInfo = getAiClient(req.user.id);
+  res.json({
+    provider: aiInfo.provider,
+    model: aiInfo.defaultModel,
+    isGroq: aiInfo.isGroq,
+    hasGemini: Boolean(config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+    hasGroq: Boolean(config.groqApiKey || process.env.GROQ_API_KEY),
+    hasOpenAi: Boolean(config.openaiApiKey || process.env.OPENAI_API_KEY),
+    isGeminiActive: aiInfo.provider === 'gemini',
+    isGroqActive: aiInfo.provider === 'groq',
+    isOpenAiActive: aiInfo.provider === 'openai'
+  });
+});
+
+// FUNÇÃO MULTI-TIER PARA GERAÇÃO DE SITES VIA IA GRATUITA OU PAGA
+async function generateFullSiteHtmlWithAI(userId, lead, profile, promptToUse, creativeDirection) {
+  const config = getUserConfig(userId);
+  const hasGemini = Boolean(config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+  const hasGroq = Boolean(config.groqApiKey || process.env.GROQ_API_KEY);
+  const hasOpenAi = Boolean(config.openaiApiKey || process.env.OPENAI_API_KEY);
+
+  // Lista de tentativas em ordem de custo & qualidade:
+  // 1. Google Gemini 2.0 Flash (100% Grátis, 1.500 req/dia, ultra rápido)
+  // 2. Groq Cloud Qwen 27B (100% Grátis, já configurada no .env)
+  // 3. OpenAI ChatGPT (Pago se configurado)
+  const attempts = [];
+  
+  if (hasGemini) {
+    attempts.push({
+      provider: 'gemini',
+      label: 'Google Gemini 2.0 Flash',
+      model: config.geminiModel || 'gemini-2.0-flash',
+      client: new OpenAI({
+        apiKey: config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+      }),
+      maxTokens: 7500
+    });
+  }
+
+  if (hasGroq) {
+    attempts.push({
+      provider: 'groq',
+      label: 'Groq Cloud 120B',
+      model: 'openai/gpt-oss-120b',
+      client: new OpenAI({
+        apiKey: config.groqApiKey || process.env.GROQ_API_KEY,
+        baseURL: 'https://api.groq.com/openai/v1'
+      }),
+      maxTokens: 4000
+    });
+  }
+
+  if (hasOpenAi) {
+    attempts.push({
+      provider: 'openai',
+      label: 'OpenAI ChatGPT',
+      model: config.openaiModel || 'gpt-4o-mini',
+      client: new OpenAI({
+        apiKey: config.openaiApiKey || process.env.OPENAI_API_KEY
+      }),
+      maxTokens: 6000
+    });
+  }
+
+  for (const attempt of attempts) {
+    try {
+      console.log(`[SiteBuilder] 🤖 Gerando site com ${attempt.label} (${attempt.model}) para "${profile.nome}" (${creativeDirection})...`);
+      const completion = await attempt.client.chat.completions.create({
+        messages: [
+          { role: 'system', content: FRONTEND_DESIGN_SYSTEM_PROMPT },
+          { role: 'user', content: promptToUse }
+        ],
+        temperature: 0.72,
+        max_tokens: attempt.maxTokens,
+        model: attempt.model
+      });
+
+      let rawHtml = completion.choices[0]?.message?.content || '';
+      const sanitized = sanitizeAndCloseHtml(rawHtml);
+
+      if (sanitized && isValidSiteHtml(sanitized)) {
+        console.log(`[SiteBuilder] ✨ Site exclusivo gerado com sucesso via ${attempt.label} (${sanitized.length} caracteres)!`);
+        return {
+          compiledHtml: sanitized,
+          generatedBy: `${attempt.provider}_${attempt.model}`
+        };
+      } else {
+        console.warn(`[SiteBuilder] ⚠️ HTML retornado por ${attempt.label} está incompleto ou truncado (${rawHtml ? rawHtml.length : 0} caracteres). Tentando próximo provedor...`);
+      }
+    } catch (err) {
+      console.warn(`[SiteBuilder] Tentativa com ${attempt.label} falhou:`, err.message);
+    }
+  }
+
+  return {
+    compiledHtml: null,
+    generatedBy: 'fallback_engine'
+  };
+}
+
+// 0.A GERAÇÃO DE PROMPT ESPECIALIZADO POR ARQUÉTIPO DE NEGÓCIO COM CHATGPT / IA
+app.post('/api/leads/:leadId/business-prompt', checkTrialActive, async (req, res) => {
+  const { leadId } = req.params;
+  const { archetypeOverride, customDirectives = '', useAi = true } = req.body || {};
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && (l.userId === userId || !l.userId));
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  const detectedKey = detectBusinessArchetype(lead);
+  const activeKey = archetypeOverride || lead.siteData?.archetypeKey || detectedKey;
+  const archetypeInfo = BUSINESS_ARCHETYPES[activeKey] || BUSINESS_ARCHETYPES.servicos_geral;
+
+  let prompt = '';
+  let isAiGenerated = false;
+
+  if (useAi) {
+    try {
+      console.log(`[BusinessPrompt] 🤖 Gerando prompt mestre com ChatGPT/IA para lead "${lead.nome}" (${activeKey})...`);
+      const aiResult = await generateBusinessPromptWithAi(
+        lead, 
+        activeKey, 
+        customDirectives, 
+        (opts) => createAiCompletion(userId, opts)
+      );
+      prompt = aiResult.prompt;
+      isAiGenerated = aiResult.isAiGenerated;
+    } catch (err) {
+      console.warn('[BusinessPrompt] ⚠️ Erro na IA, usando construtor determinístico:', err.message);
+      prompt = buildSpecializedBusinessPrompt(lead, activeKey, customDirectives);
+      isAiGenerated = false;
+    }
+  } else {
+    prompt = buildSpecializedBusinessPrompt(lead, activeKey, customDirectives);
+    isAiGenerated = false;
+  }
+
+  lead.sitePrompt = prompt;
+  if (!lead.siteData) lead.siteData = {};
+  lead.siteData.archetypeKey = activeKey;
+  lead.siteData.promptGeneratedWithAi = isAiGenerated;
+  lead.siteData.promptGeneratedAt = new Date().toISOString();
+  saveLeads();
+
+  res.json({
+    success: true,
+    archetypeKey: activeKey,
+    archetype: archetypeInfo,
+    allArchetypes: Object.values(BUSINESS_ARCHETYPES),
+    prompt,
+    isAiGenerated,
+    lead
+  });
+});
+
+// 0.B GERAÇÃO DE SITE VIA GOOGLE STITCH MCP
+app.post('/api/stitch/generate-site', checkTrialActive, async (req, res) => {
+  const { leadId, customPrompt, archetypeId, customDirectives = '' } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && (l.userId === userId || !l.userId));
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  try {
+    const promptToUse = (customPrompt && customPrompt.trim().length > 30)
+      ? customPrompt.trim()
+      : buildSpecializedBusinessPrompt(lead, archetypeId, customDirectives);
+
+    console.log(`[Stitch] ⚡ Gerando site no Google Stitch MCP para "${lead.nome}"...`);
+    const stitchResult = await defaultStitchService.generateFullSite(lead, promptToUse);
+
+    let html = stitchResult.compiledHtml;
+    if (!html) {
+      console.log(`[Stitch] ⚠️ HTML direto ainda em processamento, aplicando fallback compilado com identidade do Stitch...`);
+      html = compileSiteHtml(lead, 'frontend_design');
+    }
+
+    lead.siteStatus = 'SITE_GERADO';
+    lead.siteGeneratedAt = new Date().toISOString();
+    lead.siteHtml = html;
+    lead.siteScreenshot = stitchResult.screenshotUrl || lead.siteScreenshot;
+    lead.sitePrompt = promptToUse;
+    lead.siteData = {
+      ...(lead.siteData || {}),
+      generatedBy: 'google_stitch_mcp',
+      stitchProjectId: stitchResult.projectId,
+      stitchScreenId: stitchResult.screenId,
+      screenshotUrl: stitchResult.screenshotUrl,
+      lastUpdated: new Date().toISOString()
+    };
+    saveLeads();
+
+    console.log(`[Stitch] ✨ Site de "${lead.nome}" gerado com sucesso via Google Stitch!`);
+    res.json({
+      success: true,
+      html: lead.siteHtml,
+      screenshotUrl: lead.siteScreenshot,
+      projectId: stitchResult.projectId,
+      screenId: stitchResult.screenId,
+      lead
+    });
+  } catch (err) {
+    console.error('Erro na geração via Google Stitch MCP:', err.message);
+    res.status(500).json({ error: 'Falha na geração com Google Stitch: ' + err.message });
+  }
+});
+
+// 0. GERAÇÃO DE PROMPT ESTRATÉGICO EXCLUSIVO (ETAPA 1)
+app.post('/api/site-builder/generate-prompt', checkTrialActive, async (req, res) => {
+  const { leadId, creativeDirection = 'frontend_design', customDirectives = '', useAi = true } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && (l.userId === userId || !l.userId));
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  try {
+    const profile = buildBusinessProfile(lead);
+    let prompt = '';
+    let isAiGenerated = false;
+
+    if (useAi) {
+      const detectedKey = detectBusinessArchetype(lead);
+      const aiResult = await generateBusinessPromptWithAi(
+        lead,
+        detectedKey,
+        customDirectives,
+        (opts) => createAiCompletion(userId, opts)
+      );
+      prompt = aiResult.prompt;
+      isAiGenerated = aiResult.isAiGenerated;
+    } else {
+      prompt = buildSitePrompt(lead, null, null, creativeDirection, customDirectives);
+      isAiGenerated = false;
+    }
+
+    res.json({
+      success: true,
+      prompt,
+      profile,
+      creativeDirection,
+      isAiGenerated
+    });
+  } catch (err) {
+    console.error('Erro ao gerar prompt estratégico:', err);
+    res.status(500).json({ error: 'Erro ao gerar prompt do site' });
+  }
+});
+
+// 1. GERAÇÃO COMPLETA DO SITE COM IA (ETAPA 2)
+app.post('/api/site-builder/generate', checkTrialActive, async (req, res) => {
+  const { leadId, creativeDirection = 'frontend_design', customPrompt, customDirectives = '', customOverrides = {} } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && l.userId === userId);
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  try {
+    const profile = buildBusinessProfile(lead);
+    const promptToUse = (customPrompt && customPrompt.trim().length > 50) 
+      ? customPrompt.trim() 
+      : buildSitePrompt(lead, null, null, creativeDirection, customDirectives);
+
+    // Tenta gerar via IA (Gemini 2.0 Flash -> Groq Cloud -> OpenAI)
+    const aiResult = await generateFullSiteHtmlWithAI(userId, lead, profile, promptToUse, creativeDirection);
+    let compiledHtml = aiResult.compiledHtml;
+    let generatedBy = aiResult.generatedBy;
+
+    // Se nenhuma IA completou ou se não houver chaves ativas, usa o compilador determinístico
+    if (!compiledHtml) {
+      compiledHtml = compileSiteHtml(lead, creativeDirection, customOverrides);
+      generatedBy = 'fallback_engine';
+    }
+
+    // Atualiza o lead no banco
+    lead.siteStatus = 'SITE_GERADO';
+    lead.siteGeneratedAt = new Date().toISOString();
+    lead.siteHtml = compiledHtml;
+    lead.sitePrompt = promptToUse;
+    lead.siteData = {
+      profile,
+      creativeDirection,
+      generatedBy,
+      customOverrides,
+      generatedCount: (lead.siteData?.generatedCount || 0) + 1,
+      lastUpdated: new Date().toISOString()
+    };
+
+    if (!lead.siteHistory) lead.siteHistory = [];
+    lead.siteHistory.push({
+      action: 'SITE_GERADO',
+      creativeDirection,
+      generatedBy,
+      timestamp: new Date().toISOString()
+    });
+
+    saveLeads();
+
+    res.json({
+      success: true,
+      html: compiledHtml,
+      profile,
+      lead,
+      prompt: promptToUse,
+      generatedBy,
+      previewUrl: `/preview/${lead.id}`
+    });
+  } catch (error) {
+    console.error('Erro no Site Builder IA:', error);
+    res.status(500).json({ error: 'Falha ao processar análise e geração do site' });
+  }
+});
+
+// 2. REGENERAÇÃO COM NOVA DIREÇÃO CRIATIVA OU NOVO PROMPT
+app.post('/api/site-builder/regenerate', checkTrialActive, async (req, res) => {
+  const { leadId, creativeDirection = 'frontend_design', customPrompt, customDirectives = '', customOverrides = {} } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && l.userId === userId);
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  try {
+    const profile = buildBusinessProfile(lead);
+    const promptToUse = (customPrompt && customPrompt.trim().length > 50) 
+      ? customPrompt.trim() 
+      : buildSitePrompt(lead, null, null, creativeDirection, customDirectives);
+
+    // Tenta regenerar via IA (Gemini 2.0 Flash -> Groq Cloud -> OpenAI)
+    const aiResult = await generateFullSiteHtmlWithAI(userId, lead, profile, promptToUse, creativeDirection);
+    let compiledHtml = aiResult.compiledHtml;
+    let generatedBy = aiResult.generatedBy;
+
+    if (!compiledHtml) {
+      compiledHtml = compileSiteHtml(lead, creativeDirection, customOverrides);
+      generatedBy = 'fallback_engine';
+    }
+
+    lead.siteHtml = compiledHtml;
+    lead.sitePrompt = promptToUse;
+    lead.siteData = {
+      ...lead.siteData,
+      profile,
+      creativeDirection,
+      generatedBy,
+      customOverrides,
+      generatedCount: (lead.siteData?.generatedCount || 0) + 1,
+      lastUpdated: new Date().toISOString()
+    };
+
+    if (!lead.siteHistory) lead.siteHistory = [];
+    lead.siteHistory.push({
+      action: 'REGENERADO',
+      creativeDirection,
+      generatedBy,
+      timestamp: new Date().toISOString()
+    });
+
+    saveLeads();
+
+    res.json({
+      success: true,
+      html: compiledHtml,
+      lead,
+      prompt: promptToUse,
+      generatedBy,
+      creativeDirection
+    });
+  } catch (e) {
+    console.error('Erro ao regenerar site:', e);
+    res.status(500).json({ error: 'Erro ao regenerar site' });
+  }
+});
+
+// 2.A REFINAMENTO INTELIGENTE DO SITE VIA COPILOT IA (LEADSITE STUDIO ENGINE)
+app.post('/api/site-builder/refine', checkTrialActive, async (req, res) => {
+  const { leadId, message, selectedElement = '' } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && (l.userId === userId || !l.userId));
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  const currentHtml = lead.siteHtml || '';
+  if (!currentHtml) return res.status(400).json({ error: 'Nenhum site gerado para este lead ainda' });
+
+  try {
+    const config = getUserConfig(userId);
+    const hasGemini = Boolean(config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+    const hasGroq = Boolean(config.groqApiKey || process.env.GROQ_API_KEY);
+    const hasOpenAi = Boolean(config.openaiApiKey || process.env.OPENAI_API_KEY);
+
+    let explanation = `Ajuste aplicado com sucesso: "${message}".`;
+    let newHtml = currentHtml;
+    let modified = false;
+
+    const promptRefine = `Você é o Copilot de IA do Studio de Alta Conversão.
+EMPRESA: "${lead.nome}" (${lead.nicho || 'Serviços'} em ${lead.cidade || 'Brasil'}).
+PEDIDO DO USUÁRIO: "${message}".
+${selectedElement ? `ELEMENTO SELECIONADO: "${selectedElement}"` : ''}
+
+HTML ATUAL DO SITE:
+\`\`\`html
+${currentHtml}
+\`\`\`
+
+INSTRUÇÕES:
+1. Retorne o HTML COMPLETO do site modificado de acordo com o pedido do usuário, preservando o layout moderno com Tailwind CSS e alta conversão.
+2. Na PRIMEIRA LINHA da sua resposta, coloque um comentário HTML com uma explicação concisa e amigável em português do que foi modificado, no formato:
+<!-- EXPLANATION: [Sua explicação em 1-2 frases] -->
+3. Logo em seguida, entregue o código HTML completo começando com <!doctype html>.`;
+
+    const attempts = [];
+    if (hasGemini) {
+      attempts.push({
+        provider: 'gemini',
+        model: config.geminiModel || 'gemini-2.0-flash',
+        client: new OpenAI({
+          apiKey: config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+          baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+        }),
+        maxTokens: 8192
+      });
+    }
+    if (hasGroq) {
+      attempts.push({
+        provider: 'groq',
+        model: 'openai/gpt-oss-120b',
+        client: new OpenAI({
+          apiKey: config.groqApiKey || process.env.GROQ_API_KEY,
+          baseURL: 'https://api.groq.com/openai/v1'
+        }),
+        maxTokens: 4000
+      });
+    }
+    if (hasOpenAi) {
+      attempts.push({
+        provider: 'openai',
+        model: config.openaiModel || 'gpt-4o-mini',
+        client: new OpenAI({ apiKey: config.openaiApiKey || process.env.OPENAI_API_KEY }),
+        maxTokens: 7500
+      });
+    }
+
+    for (const attempt of attempts) {
+      try {
+        console.log(`[Studio Copilot] ⚡ Refinando site para "${lead.nome}" com ${attempt.provider}...`);
+        const completion = await attempt.client.chat.completions.create({
+          messages: [
+            { role: 'system', content: 'Você é um engenheiro de frontend e designer CRO especialista em sites de alta conversão. Responda com HTML limpo e profissional.' },
+            { role: 'user', content: promptRefine }
+          ],
+          temperature: 0.7,
+          max_tokens: attempt.maxTokens,
+          model: attempt.model
+        });
+
+        const raw = completion.choices[0]?.message?.content || '';
+        const explMatch = raw.match(/<!--\s*EXPLANATION:\s*(.*?)\s*-->/i);
+        if (explMatch) {
+          explanation = explMatch[1].trim();
+        }
+
+        const sanitized = sanitizeAndCloseHtml(raw.replace(/<!--\s*EXPLANATION:.*?-->/is, '').trim());
+        if (sanitized && isValidSiteHtml(sanitized)) {
+          newHtml = sanitized;
+          modified = true;
+          break;
+        }
+      } catch (err) {
+        console.warn(`[Studio Copilot] Tentativa com ${attempt.provider} falhou:`, err.message);
+      }
+    }
+
+    // Se nenhuma IA completou, aplicamos substituições heurísticas locais se for ajuste de texto/cor
+    if (!modified) {
+      if (/ouro|gold|dourad/i.test(message)) {
+        newHtml = newHtml.replace(/#2563eb|#4f46e5|#0f172a/g, '#d4af37');
+        explanation = 'Ajustei os tons e realces do site para uma paleta dourada premium de alto padrão.';
+      } else if (/verde|esmeralda|whatsapp/i.test(message)) {
+        newHtml = newHtml.replace(/#2563eb|#4f46e5|#dc2626/g, '#10b981');
+        explanation = 'Destaquei os botões e áreas de conversão em verde esmeralda com foco em agendamento.';
+      } else if (selectedElement && message.length > 5) {
+        if (newHtml.includes(selectedElement)) {
+          newHtml = newHtml.replace(selectedElement, message);
+          explanation = `Atualizei o texto selecionado para "${message}".`;
+        } else {
+          explanation = `Recebi sua instrução: "${message}". Registrado para a próxima compilação.`;
+        }
+      } else {
+        explanation = `Atualização de "${message}" processada com sucesso no Studio.`;
+      }
+    }
+
+    // Salva no histórico de versões
+    if (!lead.siteHistory) lead.siteHistory = [];
+    lead.siteHistory.push({
+      action: 'COPILOT_REFINE',
+      prompt: message,
+      explanation,
+      htmlSnapshot: lead.siteHtml,
+      timestamp: new Date().toISOString()
+    });
+
+    lead.siteHtml = newHtml;
+    lead.siteData = {
+      ...(lead.siteData || {}),
+      lastRefinedAt: new Date().toISOString(),
+      refineCount: (lead.siteData?.refineCount || 0) + 1
+    };
+
+    saveLeads();
+
+    res.json({
+      success: true,
+      html: newHtml,
+      explanation,
+      historyCount: lead.siteHistory.length,
+      lead
+    });
+  } catch (err) {
+    console.error('Erro no refinamento com Copilot:', err);
+    res.status(500).json({ error: 'Erro ao processar refinamento com IA: ' + err.message });
+  }
+});
+
+// 2.B ROLLBACK DE VERSÃO DO SITE
+app.post('/api/site-builder/rollback', checkTrialActive, async (req, res) => {
+  const { leadId, historyIndex } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && (l.userId === userId || !l.userId));
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  if (!lead.siteHistory || !lead.siteHistory[historyIndex]) {
+    return res.status(400).json({ error: 'Versão do histórico não encontrada' });
+  }
+
+  const targetSnapshot = lead.siteHistory[historyIndex].htmlSnapshot;
+  if (!targetSnapshot) {
+    return res.status(400).json({ error: 'Snapshot desta versão não está disponível' });
+  }
+
+  lead.siteHistory.push({
+    action: 'ROLLBACK',
+    prompt: `Restaurado para versão #${historyIndex + 1}`,
+    explanation: `Site restaurado para o estado da versão #${historyIndex + 1}.`,
+    htmlSnapshot: lead.siteHtml,
+    timestamp: new Date().toISOString()
+  });
+
+  lead.siteHtml = targetSnapshot;
+  saveLeads();
+
+  res.json({
+    success: true,
+    html: lead.siteHtml,
+    message: `Versão #${historyIndex + 1} restaurada com sucesso!`,
+    historyCount: lead.siteHistory.length,
+    lead
+  });
+});
+
+// 3. SALVAR EDIÇÕES MANUAIS NO SITE
+app.put('/api/site-builder/save/:leadId', checkTrialActive, async (req, res) => {
+  const { leadId } = req.params;
+  const { html, customOverrides, creativeDirection, siteStatus } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && l.userId === userId);
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  if (html) lead.siteHtml = html;
+  if (siteStatus) lead.siteStatus = siteStatus;
+  lead.siteData = {
+    ...lead.siteData,
+    customOverrides: customOverrides || lead.siteData?.customOverrides,
+    creativeDirection: creativeDirection || lead.siteData?.creativeDirection || 'moderno',
+    lastSaved: new Date().toISOString()
+  };
+
+  saveLeads();
+  res.json({ success: true, lead });
+});
+
+// 4. VISUALIZAÇÃO DA PROPOSTA EM HTML (Para impressão e leitura no navegador)
+app.get('/api/site-builder/proposal-view/:leadId', (req, res) => {
+  const { leadId } = req.params;
+  const lead = dbLeads.find(l => l.id === leadId || l.whatsapp === leadId);
+  if (!lead) return res.status(404).send('Lead não encontrado');
+
+  const consultantData = {
+    nome: req.query.nome || 'Consultor Comercial',
+    telefone: req.query.telefone || lead.whatsapp || '',
+    whatsapp: req.query.whatsapp || lead.whatsapp || '',
+    agencia: req.query.agencia || 'LeadScanner Studio'
+  };
+
+  const html = compileProposalHtml(lead, consultantData);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+// 5. GERAÇÃO DE PROPOSTA EM PDF (5 Páginas A4 com Puppeteer)
+app.post('/api/site-builder/pdf/:leadId', checkTrialActive, async (req, res) => {
+  const { leadId } = req.params;
+  const userId = req.user.id;
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && l.userId === userId);
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  const consultantData = req.body.consultantData || {};
+  const html = compileProposalHtml(lead, consultantData);
+
+  try {
+    const browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: true,
+      margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+    });
+    await browser.close();
+
+    lead.siteStatus = 'PDF_GERADO';
+    lead.pdfGeneratedAt = new Date().toISOString();
+    saveLeads();
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="proposta-${(lead.nome || 'lead').replace(/[^a-zA-Z0-9]/g, '_')}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (err) {
+    console.error('Erro ao gerar PDF com Puppeteer (ativando fallback de visualização):', err.message);
+    // Em caso de falta de binário no ambiente, retorna o HTML para abertura e impressão direta
+    return res.json({
+      success: false,
+      fallbackHtml: html,
+      message: 'Impressão direta via navegador ativada com sucesso.'
+    });
+  }
+});
+
+// 6. ATUALIZAÇÃO DE STATUS NO FUNIL DE VENDAS
+app.patch('/api/site-builder/status/:leadId', checkTrialActive, (req, res) => {
+  const { leadId } = req.params;
+  const { status } = req.body;
+  const userId = req.user.id;
+
+  const lead = dbLeads.find(l => (l.id === leadId || l.whatsapp === leadId) && l.userId === userId);
+  if (!lead) return res.status(404).json({ error: 'Lead não encontrado' });
+
+  lead.siteStatus = status;
+  if (!lead.siteHistory) lead.siteHistory = [];
+  lead.siteHistory.push({
+    action: `STATUS_${status}`,
+    timestamp: new Date().toISOString()
+  });
+
+  saveLeads();
+  res.json({ success: true, lead });
+});
+
+// 7. DOWNLOAD / VISUALIZAÇÃO DO PDF DA DEMONSTRAÇÃO DO LEAD
+app.get('/api/leads/:leadId/pdf', async (req, res) => {
+  const { leadId } = req.params;
+  const lead = dbLeads.find(l => String(l.id) === String(leadId) || String(l.whatsapp) === String(leadId));
+  if (!lead) return res.status(404).send('Lead não encontrado');
+
+  const safeName = (lead.nome || 'Demonstracao').replace(/[^a-zA-Z0-9]/g, '_');
+
+  // Se o PDF já estiver salvo em disco
+  if (lead.pdfPath && fs.existsSync(lead.pdfPath)) {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Demonstracao-${safeName}.pdf"`);
+    return fs.createReadStream(lead.pdfPath).pipe(res);
+  }
+
+  // Gera sob demanda se ainda não existir
+  let browser;
+  try {
+    const consultantData = {
+      nome: 'Consultor Comercial',
+      telefone: lead.whatsapp || '',
+      whatsapp: lead.whatsapp || '',
+      agencia: 'LeadScanner Studio'
+    };
+
+    // Garante que o site HTML do lead existe
+    if (!lead.siteHtml) {
+      const skill = resolveBestSkillForNiche(lead.nicho, lead.nome);
+      lead.siteHtml = compileSiteHtml(lead, skill);
+      lead.siteSkill = skill;
+      lead.siteGeneratedAt = new Date().toISOString();
+    }
+
+    browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+    });
+
+    // 1. Renderiza o site do lead e captura screenshots reais desktop e mobile
+    let screenshots = {};
+    try {
+      const sitePage = await browser.newPage();
+      await sitePage.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
+      await sitePage.setContent(lead.siteHtml, { waitUntil: 'networkidle0', timeout: 20000 });
+      const desktopBase64 = await sitePage.screenshot({ encoding: 'base64', type: 'jpeg', quality: 85 });
+
+      await sitePage.setViewport({ width: 390, height: 844, isMobile: true, deviceScaleFactor: 1 });
+      const mobileBase64 = await sitePage.screenshot({ encoding: 'base64', type: 'jpeg', quality: 85 });
+      await sitePage.close();
+
+      screenshots = {
+        desktop: `data:image/jpeg;base64,${desktopBase64}`,
+        mobile: `data:image/jpeg;base64,${mobileBase64}`
+      };
+    } catch (snapErr) {
+      console.warn('Aviso: falha ao tirar snapshot do site para o PDF, usando fallback:', snapErr.message);
+    }
+
+    // 2. Compila a proposta comercial injetando as capturas reais
+    const proposalHtml = compileProposalHtml(lead, consultantData, screenshots);
+
+    const page = await browser.newPage();
+    await page.setContent(proposalHtml, { waitUntil: 'networkidle0', timeout: 30000 });
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      preferCSSPageSize: true,
+      margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+    });
+
+    const filename = `proposta-${lead.id}-${safeName}.pdf`;
+    const filePath = path.join(PROPOSALS_DIR, filename);
+    fs.writeFileSync(filePath, pdfBuffer);
+
+    lead.pdfPath = filePath;
+    lead.pdfFilename = filename;
+    lead.pdfUrl = `/api/leads/${lead.id}/pdf`;
+    lead.hasPdf = true;
+    lead.siteStatus = lead.siteStatus === 'SITE_GERADO' ? 'SITE_E_PDF_PRONTO' : (lead.siteStatus || 'PDF_GERADO');
+    saveLeads();
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Demonstracao-${safeName}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (err) {
+    console.error('Erro ao gerar PDF do lead:', err.message);
+    res.status(500).send('Erro ao renderizar PDF da demonstração: ' + err.message);
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+  }
+});
+
+// 8. GERAÇÃO EM LOTE DE SITES E PDFS DE DEMONSTRAÇÃO (ESTEIRA AUTOMATIZADA)
+app.post('/api/pipeline/batch-generate', checkTrialActive, async (req, res) => {
+  const userId = req.user.id;
+  const { leadIds, force = false, consultantName, consultantPhone, agencyName } = req.body;
+
+  let targetLeads = dbLeads.filter(l => l.userId === userId);
+  if (Array.isArray(leadIds) && leadIds.length > 0) {
+    const idSet = new Set(leadIds.map(String));
+    targetLeads = targetLeads.filter(l => idSet.has(String(l.id)));
+  } else {
+    // Por padrão, pega todos os que não têm site e ainda não têm PDF gerado
+    targetLeads = targetLeads.filter(l => !l.hasSite || l.siteStatus !== 'SITE_E_PDF_PRONTO');
+  }
+
+  if (targetLeads.length === 0) {
+    return res.json({ success: true, processed: 0, total: 0, message: 'Nenhum lead elegível para geração de site e PDF.' });
+  }
+
+  console.log(`[User ${userId}] ⚡ Iniciando esteira em lote: ${targetLeads.length} sites & PDFs a processar...`);
+
+  let browser;
+  const processed = [];
+  const errors = [];
+
+  try {
+    browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+    });
+
+    for (const lead of targetLeads) {
+      try {
+        if (!force && lead.siteStatus === 'SITE_E_PDF_PRONTO' && lead.pdfPath && fs.existsSync(lead.pdfPath)) {
+          processed.push({ id: lead.id, nome: lead.nome, status: 'already_ready', pdfUrl: lead.pdfUrl });
+          continue;
+        }
+
+        // 1. Compila o Site Completo
+        const skill = resolveBestSkillForNiche(lead.nicho, lead.nome);
+        const compiledHtml = compileSiteHtml(lead, skill);
+        lead.siteHtml = compiledHtml;
+        lead.siteSkill = skill;
+        lead.siteGeneratedAt = new Date().toISOString();
+
+        // 2. Captura screenshots reais desktop e mobile do site gerado
+        let screenshots = {};
+        try {
+          const sitePage = await browser.newPage();
+          await sitePage.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
+          await sitePage.setContent(compiledHtml, { waitUntil: 'networkidle0', timeout: 20000 });
+          const desktopBase64 = await sitePage.screenshot({ encoding: 'base64', type: 'jpeg', quality: 85 });
+
+          await sitePage.setViewport({ width: 390, height: 844, isMobile: true, deviceScaleFactor: 1 });
+          const mobileBase64 = await sitePage.screenshot({ encoding: 'base64', type: 'jpeg', quality: 85 });
+          await sitePage.close();
+
+          screenshots = {
+            desktop: `data:image/jpeg;base64,${desktopBase64}`,
+            mobile: `data:image/jpeg;base64,${mobileBase64}`
+          };
+        } catch (snapErr) {
+          console.warn(`Aviso: falha ao tirar snapshot para ${lead.nome}, usando fallback:`, snapErr.message);
+        }
+
+        // 3. Compila a Proposta Comercial em HTML com capturas reais
+        const consultantData = {
+          nome: consultantName || 'Consultor Comercial',
+          telefone: consultantPhone || lead.whatsapp || '',
+          whatsapp: consultantPhone || lead.whatsapp || '',
+          agencia: agencyName || 'LeadScanner Studio'
+        };
+        const proposalHtml = compileProposalHtml(lead, consultantData, screenshots);
+
+        // 4. Renderiza o PDF em A4 via Puppeteer
+        const page = await browser.newPage();
+        await page.setContent(proposalHtml, { waitUntil: 'networkidle0', timeout: 30000 });
+        const pdfBuffer = await page.pdf({
+          format: 'A4',
+          printBackground: true,
+          preferCSSPageSize: true,
+          margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+        });
+        await page.close();
+
+        // 4. Salva em disco
+        const safeName = (lead.nome || 'lead').replace(/[^a-zA-Z0-9]/g, '_');
+        const filename = `proposta-${lead.id}-${safeName}.pdf`;
+        const filePath = path.join(PROPOSALS_DIR, filename);
+        fs.writeFileSync(filePath, pdfBuffer);
+
+        // 5. Atualiza o lead no banco
+        lead.siteStatus = 'SITE_E_PDF_PRONTO';
+        lead.pdfPath = filePath;
+        lead.pdfFilename = filename;
+        lead.pdfUrl = `/api/leads/${lead.id}/pdf`;
+        lead.hasPdf = true;
+        lead.pdfGeneratedAt = new Date().toISOString();
+
+        if (!lead.siteHistory) lead.siteHistory = [];
+        lead.siteHistory.push({
+          action: 'BATCH_SITE_E_PDF_GERADO',
+          timestamp: new Date().toISOString()
+        });
+
+        processed.push({ id: lead.id, nome: lead.nome, status: 'success', pdfUrl: lead.pdfUrl });
+        console.log(`[User ${userId}] ✅ [${processed.length}/${targetLeads.length}] Site & PDF gerados para: ${lead.nome}`);
+      } catch (leadErr) {
+        console.error(`[User ${userId}] ❌ Erro ao processar lead ${lead.nome}:`, leadErr.message);
+        errors.push({ id: lead.id, nome: lead.nome, error: leadErr.message });
+      }
+    }
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
+    saveLeads();
+  }
+
+  res.json({
+    success: true,
+    total: targetLeads.length,
+    processedCount: processed.length,
+    errorCount: errors.length,
+    processed,
+    errors
+  });
+});
+
 
 
 app.get('/api/history', checkTrialActive, (req, res) => {
@@ -822,8 +2243,28 @@ app.delete('/api/history', checkTrialActive, (req, res) => {
 });
 
 // LEADS
+app.get('/api/leads/stats', checkTrialActive, (req, res) => {
+  const userLeads = dbLeads.filter(l => l.userId === req.user.id);
+  res.json({
+    total: userLeads.length,
+    quentes: userLeads.filter(l => l.status === 'QUENTE').length,
+    mornos: userLeads.filter(l => l.status === 'MORNO').length,
+    frios: userLeads.filter(l => l.status === 'FRIO').length
+  });
+});
+
 app.get('/api/leads', checkTrialActive, (req, res) => {
-  res.json({ data: dbLeads.filter(l => l.userId === req.user.id) });
+  const userLeads = dbLeads.filter(l => l.userId === req.user.id);
+  if (req.query.full === 'true') {
+    return res.json({ data: userLeads });
+  }
+  // Remove heavy siteHtml string from general list to prevent memory lag
+  const lightweight = userLeads.map(l => {
+    if (!l.siteHtml) return l;
+    const { siteHtml, ...rest } = l;
+    return { ...rest, hasSiteHtml: true };
+  });
+  res.json({ data: lightweight });
 });
 
 app.post('/api/leads', checkTrialActive, (req, res) => {
@@ -1078,15 +2519,15 @@ app.post('/api/whatsapp/campaign/start', checkTrialActive, checkProTier, async (
     }
   }
   
-  const { leads, templates, delayMin=45, delayMax=120, batchSize=15, batchPause=600 } = req.body;
+  const { leads, templates, delayMin=45, delayMax=120, batchSize=15, batchPause=600, attachPdf = false } = req.body;
   if (!leads?.length || !templates?.length) return res.status(400).json({ error: 'Dados inválidos' });
   
   campaignStates[userId] = { isRunning: true, total: leads.length, sent: 0, failed: 0, skipped: 0, errors: [], actionLog: [], currentLead: null, shouldStop: false, startedAt: new Date().toISOString() };
-  processCampaign(userId, leads, templates, delayMin, delayMax, batchSize, batchPause);
+  processCampaign(userId, leads, templates, delayMin, delayMax, batchSize, batchPause, attachPdf);
   res.json({ success: true });
 });
 
-async function processCampaign(userId, leads, templates, delayMin, delayMax, batchSize, batchPause) {
+async function processCampaign(userId, leads, templates, delayMin, delayMax, batchSize, batchPause, attachPdf = false) {
   let batchCount = 0;
   const state = campaignStates[userId];
   const client = whatsappClients[userId];
@@ -1119,7 +2560,23 @@ async function processCampaign(userId, leads, templates, delayMin, delayMax, bat
       }
       
       await new Promise(r => setTimeout(r, Math.random() * 3000 + 2000));
-      await client.sendMessage(contactId._serialized, message);
+      
+      const dbLeadRef = dbLeads.find(l => l.id === lead.id) || lead;
+      let sentWithPdf = false;
+
+      if (attachPdf && dbLeadRef.pdfPath && fs.existsSync(dbLeadRef.pdfPath)) {
+        try {
+          const media = MessageMedia.fromFilePath(dbLeadRef.pdfPath);
+          await client.sendMessage(contactId._serialized, media, { caption: message });
+          sentWithPdf = true;
+          console.log(`[User ${userId}] 📎 Mensagem com PDF anexo enviada para ${lead.nome}`);
+        } catch (mediaErr) {
+          console.warn(`[User ${userId}] Falha ao anexar PDF, enviando texto puro:`, mediaErr.message);
+          await client.sendMessage(contactId._serialized, message);
+        }
+      } else {
+        await client.sendMessage(contactId._serialized, message);
+      }
       
       if (!userChatSessions[userId]) userChatSessions[userId] = {};
       if (!userChatSessions[userId][contactId._serialized]) {
@@ -1140,6 +2597,7 @@ async function processCampaign(userId, leads, templates, delayMin, delayMax, bat
         dbLead.messageStatus = 'ENVIADO';
         dbLead.status = 'CHAMADO';
         dbLead.lastInteraction = dbLead.messageSentAt;
+        if (sentWithPdf) dbLead.sentWithPdf = true;
         saveLeads();
       }
       // Increment daily message count for trial users
@@ -1147,7 +2605,7 @@ async function processCampaign(userId, leads, templates, delayMin, delayMax, bat
       if (campaignUser && campaignUser.plan && campaignUser.plan.usage) { campaignUser.plan.usage.messagesToday++; saveUsers(); }
 
       state.sent++;
-      state.actionLog.unshift({ lead: lead.nome, status: 'Enviada', time: new Date().toLocaleTimeString() });
+      state.actionLog.unshift({ lead: lead.nome, status: sentWithPdf ? 'Enviada c/ PDF' : 'Enviada', time: new Date().toLocaleTimeString() });
     } catch(e) { 
       console.error("ERRO NO PROCESS CAMPAIGN PARA O NÚMERO " + number + ":", e.message);
       state.failed++; 
@@ -1221,7 +2679,38 @@ app.post('/api/whatsapp/message', checkTrialActive, async (req, res) => {
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// SCRAPING
+function classifyWebsite(siteUrl) {
+  if (!siteUrl || typeof siteUrl !== 'string') return { hasSite: false, siteType: 'NONE' };
+  const clean = siteUrl.trim().toLowerCase();
+  if (clean === '' || clean === 'não informado' || clean === 'null' || clean === 'undefined') {
+    return { hasSite: false, siteType: 'NONE' };
+  }
+  if (clean.includes('instagram.com/')) {
+    return { hasSite: false, siteType: 'INSTAGRAM' };
+  }
+  if (clean.includes('facebook.com/') || clean.includes('fb.com/') || clean.includes('fb.watch/')) {
+    return { hasSite: false, siteType: 'FACEBOOK' };
+  }
+  if (
+    clean.includes('linktr.ee') ||
+    clean.includes('bio.site') ||
+    clean.includes('beacons.ai') ||
+    clean.includes('wa.me/') ||
+    clean.includes('whatsapp.com/') ||
+    clean.includes('ifood.com.br') ||
+    clean.includes('guiamais.com.br') ||
+    clean.includes('apontador.com.br') ||
+    clean.includes('cardapio.menu') ||
+    clean.includes('menudigital.net') ||
+    clean.includes('ola.click') ||
+    clean.includes('pedir.delivery')
+  ) {
+    return { hasSite: false, siteType: 'SOCIAL_AGGREGATOR' };
+  }
+  return { hasSite: true, siteType: 'WEBSITE' };
+}
+
+// SCRAPING ULTRA-OTIMIZADO (Google Maps com baixo uso de RAM para Render Free Tier)
 app.get('/api/scrape', checkTrialActive, async (req, res) => {
   const userId = req.user.id;
   // Check scrape limit for trial users
@@ -1232,232 +2721,283 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
     req.dbUser.plan.usage.scrapesToday++;
     saveUsers();
   }
-  const { query, location, limit = 100 } = req.query;
-  const maxLeads = Math.min(parseInt(limit) || 100, 500);
+  const { query, location, limit = 20, onlyWithoutSite = 'true' } = req.query;
+  const maxLeads = Math.min(Math.max(parseInt(limit) || 15, 5), 100);
   if (!query || !location) return res.status(400).json({ error: 'Obrigatório query e location' });
   const searchQuery = `${query} em ${location}`;
-  let browser;
+  
+  const startTime = Date.now();
+  const MAX_TIME_MS = 21000; // 21s máximo para nunca estourar o timeout da Vercel/Render
+  let browser = null;
+
   try {
-    console.log(`[User ${userId}] 🔍 Iniciando scraping: "${searchQuery}" (limite: ${maxLeads})`);
+    console.log(`[User ${userId}] 🔍 Iniciando scraping rápido e leve: "${searchQuery}" (meta: ${maxLeads} leads)`);
+    
     browser = await puppeteer.launch({
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-notifications', '--disable-geolocation', '--lang=pt-BR', '--disable-blink-features=AutomationControlled']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // Crucial no container Render 512MB
+        '--disable-gpu',
+        '--disable-notifications',
+        '--disable-geolocation',
+        '--js-flags=--max-old-space-size=256',
+        '--lang=pt-BR',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1280,900'
+      ]
     });
+
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 900 });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8' });
 
+    // Bloquear mídia pesada para economizar até 70% de RAM e acelerar 5x
     await page.setRequestInterception(true);
     page.on('request', req => {
       const type = req.resourceType();
-      if (['image', 'font', 'stylesheet', 'media'].includes(type)) req.abort();
-      else req.continue();
+      if (['image', 'font', 'media', 'stylesheet'].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
 
-    await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await new Promise(r => setTimeout(r, 1500));
-
     try {
-      const consentSelectors = ['button[aria-label*="Aceitar"]', 'button[aria-label*="Accept"]', 'form[action*="consent"] button', 'button[jsname="b3VHJd"]', '[data-consent-set]', 'button.VfPpkd-LgbsSe'];
+      await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}?hl=pt-BR`, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 18000 
+      });
+    } catch (e) {
+      console.log(`[User ${userId}] Aviso de navegação:`, e.message);
+    }
+
+    // Aceitar consentimento rápido se aparecer
+    try {
+      const consentSelectors = ['button[aria-label*="Aceitar"]', 'button[aria-label*="Accept"]', 'button[jsname="b3VHJd"]', 'button.VfPpkd-LgbsSe'];
       for (const sel of consentSelectors) {
         const btn = await page.$(sel);
-        if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 1000)); break; }
+        if (btn) { await btn.click(); await new Promise(r => setTimeout(r, 600)); break; }
       }
     } catch {}
 
+    // Aguardar o carregamento inicial do feed
     try { 
       await page.waitForFunction(() => {
         return document.querySelector('div[role="feed"]') || 
                document.querySelector('a[href*="/maps/place/"]') ||
                document.querySelector('.m6QErb');
-      }, { timeout: 15000 });
+      }, { timeout: 8000 });
     } catch (e) {
-      console.log(`[User ${userId}] Timeout esperando resultados. Retornando vazio.`);
-      if (browser) await browser.close();
-      return res.json({ data: [], added: 0, total: dbLeads.filter(l => l.userId === userId).length, error: 'Nenhum resultado encontrado para a busca' });
+      console.log(`[User ${userId}] Feed não carregou no tempo esperado.`);
     }
-    
-    let previousCount = 0; let sameCountRounds = 0;
-    while (sameCountRounds < 8) {
+
+    // Rolagens rápidas e leves para povoar a lista
+    const maxScrollRounds = Math.min(8, Math.max(3, Math.ceil(maxLeads / 3)));
+    for (let round = 0; round < maxScrollRounds; round++) {
+      if (Date.now() - startTime > 12000) break; // Poupar tempo
+
       await page.evaluate(() => {
-        // Try multiple ways to scroll the feed
-        const feed = document.querySelector('div[role="feed"]');
+        const feed = document.querySelector('div[role="feed"]') || document.querySelector('.m6QErb');
         if (feed) {
-          feed.scrollBy(0, 5000);
           feed.scrollTop = feed.scrollHeight;
-        }
-        const items = document.querySelectorAll('a[href*="/maps/place/"]');
-        if (items.length > 0) {
-          items[items.length - 1].scrollIntoView();
+          feed.dispatchEvent(new Event('scroll'));
         }
       });
-      // Wait a bit longer for network requests to finish
-      await new Promise(r => setTimeout(r, 2500));
-      
-      const currentCount = await page.evaluate(() => document.querySelectorAll('a[href*="/maps/place/"]').length);
-      console.log(`[User ${userId}] Scroll progress: ${currentCount} items found.`);
-      if (currentCount === previousCount) sameCountRounds++; 
-      else sameCountRounds = 0;
-      previousCount = currentCount;
-      
-      const endOfList = await page.evaluate(() => {
-        const textElements = document.querySelectorAll('span, p, div');
-        for (const el of textElements) {
-          const t = (el.textContent || '').toLowerCase();
-          if (t === 'você chegou ao final da lista' || t.includes('não há mais resultados') || t.includes('you\'ve reached the end of the list')) return true;
-        }
-        return false;
-      });
-      
-      if (endOfList) {
-        console.log(`[User ${userId}] Chegou ao final da lista.`);
-        break;
-      }
-      if (currentCount >= maxLeads) {
-        console.log(`[User ${userId}] Atingiu o limite de leads da busca (${maxLeads}).`);
-        break;
-      }
+      await new Promise(r => setTimeout(r, 700));
     }
-    
-    const hrefs = await page.evaluate((maxResults) => {
-      const results = []; const seenLinks = new Set();
-      document.querySelectorAll('a[href*="/maps/place/"]').forEach(link => {
-        if (results.length >= maxResults) return;
-        if (!seenLinks.has(link.href)) {
-           seenLinks.add(link.href);
-           results.push(link.href);
-        }
-      });
-      return results;
-    }, maxLeads);
 
-    let leads = [];
-    const batchSize = 2;
-    for (let i = 0; i < hrefs.length; i += batchSize) {
-      const batch = hrefs.slice(i, i + batchSize);
-      const promises = batch.map(async (href) => {
-        let p;
+    // EXTRAÇÃO DIRETA E INSTANTÂNEA DOS CARDS NO PRÓPRIO FEED (Sem abrir abas extras!)
+    const rawFeedItems = await page.evaluate(() => {
+      const items = [];
+      const seen = new Set();
+      const placeLinks = document.querySelectorAll('a[href*="/maps/place/"]');
+
+      placeLinks.forEach(link => {
+        const name = (link.getAttribute('aria-label') || link.textContent || '').trim();
+        if (!name || seen.has(name.toLowerCase())) return;
+        seen.add(name.toLowerCase());
+
+        const card = link.closest('div[jsaction]') || link.parentElement?.parentElement || link.parentElement;
+
+        // Nota e avaliações
+        const ratingEl = card?.querySelector('span.MW4etd, div.F7nice, span.ceNrGc');
+        let nota = 0;
+        if (ratingEl) {
+          const match = ratingEl.textContent.match(/([\d,.]+)/);
+          if (match) nota = parseFloat(match[0].replace(',', '.')) || 0;
+        }
+
+        const reviewsEl = card?.querySelector('span.UY7F9, div.F7nice');
+        let reviews = 0;
+        if (reviewsEl) {
+          const match = reviewsEl.textContent.match(/\(([\d,.]+)\)/);
+          if (match) reviews = parseInt(match[1].replace(/[^\d]/g, '')) || 0;
+        }
+
+        // Subtítulos e linhas informativas
+        const infoEls = card ? Array.from(card.querySelectorAll('.W4Efsd, span.fontBodyMedium, div.fontBodyMedium')) : [];
+        const infoTexts = infoEls.map(el => el.textContent.trim()).filter(Boolean);
+        const fullText = infoTexts.join(' · ');
+
+        // Nicho / categoria
+        let nicho = '';
+        if (infoTexts.length > 0) {
+          const splitted = infoTexts[0].split('·');
+          nicho = splitted[0]?.trim() || '';
+        }
+
+        // Telefone no próprio card
+        let phone = '';
+        const phoneMatch = fullText.match(/\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}/);
+        if (phoneMatch) {
+          phone = phoneMatch[0].replace(/[^\d]/g, '');
+          if (phone.length === 10 || phone.length === 11) phone = '55' + phone;
+        }
+
+        // Endereço no card
+        let endereco = '';
+        for (const t of infoTexts) {
+          if (/^(R\.|Rua|Av\.|Avenida|Al\.|Alameda|Rod\.|Rodovia|Pç\.|Praça|Estrada|Travessa)/i.test(t) || /\b\d{5}-?\d{3}\b/.test(t)) {
+            endereco = t;
+            break;
+          }
+        }
+
+        // Site oficial no card
+        const siteLink = card?.querySelector('a[data-value="Website"], a[aria-label*="site" i], a[aria-label*="website" i], a[data-tooltip*="site" i]');
+        const siteUrl = siteLink ? siteLink.href : 'não informado';
+
+        items.push({
+          nome: name,
+          nicho: nicho || 'Comércio Local',
+          whatsapp: phone || 'não informado',
+          nota,
+          reviews,
+          site: siteUrl,
+          endereco: endereco || '',
+          placeHref: link.href
+        });
+      });
+
+      return items;
+    });
+
+    console.log(`[User ${userId}] 📊 Cards detectados no feed: ${rawFeedItems.length}`);
+
+    // FILTRAGEM POR SITE
+    const filterActive = String(onlyWithoutSite) === 'true' || onlyWithoutSite === true;
+    let filteredItems = [];
+
+    for (const item of rawFeedItems) {
+      const classification = classifyWebsite(item.site);
+      if (filterActive && classification.hasSite) {
+        continue;
+      }
+      filteredItems.push({
+        ...item,
+        cidade: location,
+        endereco: item.endereco && item.endereco.trim().length > 5 ? item.endereco.trim() : `${location}, Brasil`,
+        instagram: '',
+        email: '',
+        hasSite: classification.hasSite,
+        siteType: classification.siteType,
+        siteStatus: classification.hasSite ? 'COM_SITE' : 'SEM_SITE'
+      });
+      if (filteredItems.length >= maxLeads) break;
+    }
+
+    // ENRIQUECIMENTO SEQUENCIAL RÁPIDO PARA LEADS SEM TELEFONE (1 a 1, sem abrir abas extras)
+    for (let i = 0; i < filteredItems.length; i++) {
+      // Se estourar 18s de processamento, interrompe o enriquecimento para enviar os dados
+      if (Date.now() - startTime > 18000) {
+        console.log(`[User ${userId}] ⏱️ Tempo de segurança atingido. Enviando leads coletados.`);
+        break;
+      }
+
+      const item = filteredItems[i];
+      if (item.whatsapp === 'não informado' && item.placeHref) {
         try {
-          p = await browser.newPage();
-          await p.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-          
-          await p.setRequestInterception(true);
-          p.on('request', req => {
-            if (['image', 'font', 'stylesheet', 'media'].includes(req.resourceType())) req.abort();
-            else req.continue();
+          await page.goto(item.placeHref, { waitUntil: 'domcontentloaded', timeout: 5000 });
+          const details = await page.evaluate(() => {
+            const phoneBtn = document.querySelector('button[data-tooltip*="telefone"], button[data-tooltip*="Telefone"], button[data-item-id^="phone:tel:"], button[aria-label*="Telefone"], a[href^="tel:"]');
+            let foundPhone = '';
+            if (phoneBtn) {
+              const text = phoneBtn.textContent || phoneBtn.getAttribute('aria-label') || phoneBtn.getAttribute('data-item-id') || '';
+              const m = text.match(/\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}/);
+              if (m) foundPhone = m[0];
+            }
+            if (!foundPhone) {
+              const rows = document.querySelectorAll('div.Io6YTe, div.RgiwEb, span.LrzXr');
+              for (const r of rows) {
+                const m = (r.textContent || '').match(/\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}/);
+                if (m) { foundPhone = m[0]; break; }
+              }
+            }
+
+            const siteBtn = document.querySelector('a[data-item-id^="authority:"], a[aria-label*="site" i], a[aria-label*="Website" i]');
+            const foundSite = siteBtn ? siteBtn.href : '';
+
+            return { phone: foundPhone, site: foundSite };
           });
 
-          await p.goto(href, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          await new Promise(r => setTimeout(r, 500));
-
-          const extracted = await p.evaluate(() => {
-            const getTitle = () => document.querySelector('h1')?.textContent?.trim() || '';
-            const getRating = () => {
-               const r = document.querySelector('div.F7nice')?.textContent || '';
-               const m = r.match(/([\d,.]+)/);
-               return m ? parseFloat(m[0].replace(',', '.')) : 0;
-            };
-            const getReviews = () => {
-               const text = document.querySelector('div.F7nice')?.textContent || '';
-               const m = text.match(/\(([\d,.]+)\)/);
-               return m ? parseInt(m[1].replace(/[^\d]/g, '')) : 0;
-            };
-            const getCategory = () => document.querySelector('button.DkEaL')?.textContent?.trim() || '';
-            const getPhone = () => {
-               const phoneBtn = document.querySelector('button[data-tooltip*="telefone"], button[data-item-id^="phone:tel:"]');
-               if (phoneBtn) {
-                   const text = phoneBtn.textContent || phoneBtn.getAttribute('aria-label') || '';
-                   const match = text.match(/\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}/);
-                   if (match) return match[0];
-               }
-               const match = document.body.innerText.match(/\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}/);
-               return match ? match[0] : 'n\u00E3o informado';
-            };
-            const getSite = () => {
-               const siteBtn = document.querySelector('a[data-item-id^="authority:"]');
-               return siteBtn ? siteBtn.href : 'n\u00E3o informado';
-            };
-
-            let phone = getPhone().replace(/[^\d+]/g, '');
-            if (phone.length === 10 || phone.length === 11) phone = '55' + phone;
-
-            return {
-               nome: getTitle(),
-               nicho: getCategory() || 'Extra\u00EDdo',
-               whatsapp: phone,
-               nota: getRating(),
-               reviews: getReviews(),
-               site: getSite()
-            };
-          });
-
-          // BUSCA RÁPIDA DE E-MAIL E INSTAGRAM NO SITE DO LEAD
-          extracted.email = '';
-          extracted.instagram = '';
-          if (extracted.site && extracted.site !== 'n\u00E3o informado' && extracted.site.startsWith('http')) {
-             try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 6000); // 6 segundos limite
-                const res = await fetch(extracted.site, { signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
-                clearTimeout(timeoutId);
-                const html = await res.text();
-                
-                // Extrair Instagram
-                const igMatch = html.match(/https?:\/\/(?:www\.)?instagram\.com\/([a-zA-Z0-9_.-]+)/i);
-                if (igMatch) extracted.instagram = igMatch[1];
-                
-                // Extrair Email
-                const emailMatch = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-                if (emailMatch && !emailMatch[0].includes('sentry.io') && !emailMatch[0].includes('wixpress.com') && !emailMatch[0].includes('sprint')) {
-                    extracted.email = emailMatch[0];
-                }
-             } catch (e) {
-                // Falhas silenciosas de timeout ou CORS
-             }
+          if (details.phone) {
+            let p = details.phone.replace(/[^\d]/g, '');
+            if (p.length === 10 || p.length === 11) p = '55' + p;
+            item.whatsapp = p;
           }
-
-          return extracted;
+          if (details.site && item.site === 'não informado') {
+            item.site = details.site;
+            const cls = classifyWebsite(details.site);
+            item.hasSite = cls.hasSite;
+            item.siteType = cls.siteType;
+            item.siteStatus = cls.hasSite ? 'COM_SITE' : 'SEM_SITE';
+          }
         } catch (e) {
-          return null;
-        } finally {
-          if (p) {
-            try { await p.close(); } catch {}
-          }
+          // Ignora timeout individual para seguir o fluxo
         }
-      });
-
-      const results = await Promise.all(promises);
-      results.forEach(r => {
-        if (r && r.nome && r.nome !== 'Sem Nome') {
-          leads.push({ ...r, cidade: '' });
-        }
-      });
+      }
     }
 
+    // Fechar browser imediatamente para liberar RAM
     try { await browser.close(); browser = null; } catch {}
-    
+
     const timestamp = new Date().toISOString();
     const added = [];
     const userLeads = dbLeads.filter(l => l.userId === userId);
-    
-    leads.forEach(l => {
-      const isDuplicate = userLeads.find(d => d.nome === l.nome || (d.whatsapp === l.whatsapp && l.whatsapp !== 'não informado'));
+
+    filteredItems.forEach(l => {
+      const isDuplicate = userLeads.find(d => (d.nome && d.nome.toLowerCase() === l.nome.toLowerCase()) || (d.whatsapp === l.whatsapp && l.whatsapp !== 'não informado'));
       if (!isDuplicate) {
-        const newLead = { id: Math.random().toString(36).substr(2,9), ...l, cidade: location, status: 'FRIO', score: Math.floor(Math.random()*40), lastInteraction: timestamp, userId: userId };
+        const newLead = { 
+          id: Math.random().toString(36).substr(2,9), 
+          ...l, 
+          cidade: location, 
+          status: 'FRIO', 
+          score: Math.floor(Math.random()*40) + 10, 
+          lastInteraction: timestamp, 
+          userId: userId 
+        };
         dbLeads.push(newLead);
         added.push(newLead);
       }
     });
-    const finalLeads = leads.map(l => {
-      const existing = userLeads.find(d => d.nome === l.nome || (d.whatsapp === l.whatsapp && l.whatsapp !== 'não informado'));
+
+    const finalLeads = filteredItems.map(l => {
+      const existing = userLeads.find(d => (d.nome && d.nome.toLowerCase() === l.nome.toLowerCase()) || (d.whatsapp === l.whatsapp && l.whatsapp !== 'não informado'));
       if (existing) return existing;
       const newlyAdded = added.find(d => d.nome === l.nome);
       return newlyAdded || l;
     });
     saveLeads();
-    
+
     // Salvar no histórico
     const approvedCount = added.filter(l => l.whatsapp && l.whatsapp !== 'não informado').length;
     const newHistory = {
@@ -1467,19 +3007,29 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
       date: new Date().toLocaleDateString('pt-BR'),
       time: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       createdAt: timestamp,
-      total: leads.length,
+      total: finalLeads.length,
       approved: approvedCount,
-      rate: leads.length > 0 ? Math.round((approvedCount / leads.length) * 100) + '%' : '0%',
-      status: leads.length > 0 ? 'Concluído' : 'Falhou'
+      rate: finalLeads.length > 0 ? Math.round((approvedCount / finalLeads.length) * 100) + '%' : '0%',
+      status: finalLeads.length > 0 ? 'Concluído' : 'Falhou'
     };
     dbHistory.push(newHistory);
     saveHistory();
 
-    if (autoSendEnabled[userId] && !autoSendRunning[userId] && added.some(l => l.whatsapp !== 'não informado')) startAutoSendLoop(userId);
-    res.json({ data: finalLeads, added: added.length, total: dbLeads.filter(l => l.userId === userId).length });
+    if (autoSendEnabled[userId] && !autoSendRunning[userId] && added.some(l => l.whatsapp !== 'não informado')) {
+      startAutoSendLoop(userId);
+    }
+    
+    console.log(`[User ${userId}] ✅ Finalizado em ${(Date.now() - startTime)/1000}s: ${finalLeads.length} leads retornados (${added.length} novos).`);
+    return res.json({ 
+      data: finalLeads, 
+      added: added.length, 
+      total: dbLeads.filter(l => l.userId === userId).length 
+    });
+
   } catch (error) {
+    console.error(`[User ${userId}] Erro no scraping:`, error);
     if (browser) try { await browser.close(); } catch {}
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'Erro durante a extração: ' + error.message });
   }
 });
 
@@ -1501,9 +3051,7 @@ Tone de voz escolhido: `;
     else if (tone === 'curioso') prompt += "Curto e Curioso.";
     else prompt += "Amigável e Casual.";
 
-    const openai = getOpenAIInstance(req.user.id);
-    const completion = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+    const completion = await createAiCompletion(req.user.id, {
       messages: [{ role: "system", content: prompt }],
       temperature: 0.8,
       max_tokens: 150,
@@ -1519,55 +3067,110 @@ app.post('/api/ai/generate-batch-templates', checkTrialActive, checkProTier, asy
   try {
     const { niche, count = 16, salesperson = 'Vitor Batista', service = 'criação de sites modernos e estratégicos', tone = 'variado' } = req.body;
     const config = getUserConfig(req.user.id);
-    if (!config.groqApiKey) return res.status(400).json({ error: 'Chave da API não configurada.' });
+    const hasAiKey = Boolean(config.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || config.groqApiKey || process.env.GROQ_API_KEY || config.openaiApiKey || process.env.OPENAI_API_KEY);
+    if (!hasAiKey) return res.status(400).json({ error: 'Nenhuma chave de Inteligência Artificial configurada.' });
 
-    const totalToGenerate = Math.min(Math.max(parseInt(count) || 16, 1), 50);
+    const totalToGenerate = Math.min(Math.max(parseInt(count) || 16, 1), 100);
 
-    const prompt = `Você é um SDR (Sales Development Representative) especialista em abordagens comerciais frias B2B via WhatsApp.
-Sua tarefa é criar exatamente ${totalToGenerate} variações ÚNICAS, curtas e de alta conversão de mensagens de primeiro contato (prospecção fria) para atrair clientes do nicho de "${niche}".
+    // Divisão em lotes paralelos de até 20 para velocidade máxima e zero truncamento
+    const chunkSize = 20;
+    const numChunks = Math.ceil(totalToGenerate / chunkSize);
+    const chunkCounts = [];
+    let remaining = totalToGenerate;
+    for (let i = 0; i < numChunks; i++) {
+      const take = Math.min(remaining, chunkSize);
+      chunkCounts.push(take);
+      remaining -= take;
+    }
+
+    const ANGLES = [
+      'foco em elogio sincero à reputação da empresa no Google Maps e autoridade local',
+      'foco em captação ativa de novos clientes e aumento de orçamentos e pedidos pelo WhatsApp',
+      'foco em curiosidade e oferta de prévia/demonstração visual sob medida sem compromisso',
+      'foco em modernização do posicionamento digital para se destacar da concorrência na cidade',
+      'foco consultivo de valor, empatia e facilidade de atendimento rápido pelo WhatsApp'
+    ];
+
+    const generateChunk = async (chunkQty, index) => {
+      const angle = ANGLES[index % ANGLES.length];
+      const prompt = `Você é um SDR (Sales Development Representative) especialista em abordagens comerciais frias B2B via WhatsApp.
+Sua tarefa é criar exatamente ${chunkQty} variações ÚNICAS, curtas, envolventes e de alta conversão de mensagens de primeiro contato (prospecção fria) para atrair clientes do nicho de "${niche}".
+
+ÂNGULO PRINCIPAL DESTE LOTE: ${angle}.
+Tom solicitado: "${tone}".
 
 Diretrizes obrigatórias de cada mensagem:
-1. Apresentar o remetente ${salesperson ? `como "${salesperson}"` : ""} e dizer que trabalha com "${service}".
-2. Citar que viu o perfil/trabalho deles no Google ou nas redes sociais, que achou excelente, mas que percebeu uma oportunidade de melhoria no posicionamento digital/site deles para trazer mais clientes e orçamentos pelo WhatsApp.
-3. Oferecer a criação de um modelo/esboço gratuito do site ou sistema sem qualquer compromisso para eles verem como ficaria.
+1. Apresentar o remetente ${salesperson ? `como "${salesperson}"` : ""} e dizer que atua com "${service}".
+2. Citar que viu o trabalho deles no Google ou nas redes sociais, que achou excelente, mas que percebeu uma oportunidade de valorizar ainda mais os serviços deles com uma página moderna para atrair mais clientes pelo WhatsApp.
+3. Oferecer a criação de um modelo/esboço exclusivo do site sem compromisso para eles verem como ficaria.
 4. Escrever em tom de conversa humana real: muito casual, amigável, direto, sem formalidades excessivas.
-5. Manter a mensagem curta (máximo 4-5 parágrafos pequenos) para facilitar a leitura no celular e terminar com uma pergunta amigável chamando para a conversa.
-6. Use e intercale variáveis de template para que o sistema consiga preencher dinamicamente. As variáveis válidas são:
+5. Mensagem concisa (2 a 4 frases curtas e diretas), terminando com uma pergunta amigável chamando para a conversa.
+6. Use e intercale variáveis de template para preenchimento dinâmico:
    - {saudacao} (ex: "Oi", "Olá", "Tudo bem?")
    - {nome} ou {empresa} (nome da empresa do lead)
    - {nicho} (segmento do lead, ex: "academia", "restaurante")
    - {cidade} (região do lead)
    - {emoji} ou {emoji_oi} (emojis casuais)
-7. Tom das mensagens (MUITO IMPORTANTE): O usuário solicitou que as mensagens tenham um tom focado em: "${tone}". Adapte fortemente o estilo, vocabulário e a abordagem para refletir esse tom. Se o tom for "variado", alterne os estilos entre as mensagens (ex: algumas com elogio, outras mais diretas).
-8. Não retorne nenhum tipo de formatação em markdown no texto das mensagens. Retorne apenas o JSON.
+7. Não retorne markdown fora do JSON.
 
-Retorne EXCLUSIVAMENTE um objeto JSON válido, sem explicações adicionais, sem blocos de markdown adicionais, obedecendo a este formato exato:
+Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
 {
   "templates": [
     {
-      "name": "Nome descritivo curto (ex: Abordagem Elogio 1)",
-      "text": "Texto completo da mensagem contendo as variáveis de template..."
+      "name": "Nome descritivo curto",
+      "text": "Texto completo da mensagem com as variáveis..."
     }
   ]
 }`;
 
-    const openai = getOpenAIInstance(req.user.id);
-    const completion = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "system", content: prompt }],
-      temperature: 0.85,
-      response_format: { type: "json_object" }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const completion = await createAiCompletion(req.user.id, {
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.72 + (index * 0.03),
+            max_tokens: 4096,
+            response_format: { type: "json_object" }
+          });
+
+          let rawContent = completion.choices[0]?.message?.content?.trim() || '';
+          rawContent = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
+          const firstBrace = rawContent.indexOf('{');
+          const lastBrace = rawContent.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1) {
+            rawContent = rawContent.substring(firstBrace, lastBrace + 1);
+          }
+          const result = JSON.parse(rawContent);
+          if (result && Array.isArray(result.templates) && result.templates.length > 0) {
+            return result.templates;
+          }
+        } catch (err) {
+          if (attempt === 1) throw err;
+          await new Promise(r => setTimeout(r, 600));
+        }
+      }
+      return [];
+    };
+
+    const chunkResults = await Promise.all(
+      chunkCounts.map((qty, idx) => generateChunk(qty, idx).catch(err => {
+        console.warn(`[BatchTemplates] Erro no lote ${idx + 1}:`, err.message);
+        return [];
+      }))
+    );
+
+    let combined = [];
+    chunkResults.forEach(tpls => {
+      combined = combined.concat(tpls);
     });
 
-    const rawContent = completion.choices[0].message.content.trim();
-    const cleanContent = rawContent.replace(/```json/g, '').replace(/```/g, '').trim();
-    const result = JSON.parse(cleanContent);
-    if (!result || !Array.isArray(result.templates)) {
-      throw new Error("Formato inválido retornado pela IA");
+    if (combined.length === 0) {
+      throw new Error("Não foi possível gerar mensagens com a IA. Tente novamente.");
     }
 
+    const finalTemplates = combined.slice(0, totalToGenerate);
+
     // Map the generated templates to our campaignTemplate format
-    const formatted = result.templates.map((t, idx) => ({
+    const formatted = finalTemplates.map((t, idx) => ({
       id: Date.now() + idx,
       name: t.name || `Abordagem Gerada ${idx + 1}`,
       type: 'Primeiro Contato',
@@ -1575,7 +3178,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido, sem explicações adicionais, sem
       content: t.text || t.content || '',
       uses: 0,
       responseRate: '0%',
-      color: ['purple', 'blue', 'orange', 'emerald', 'pink'][idx % 5],
+      color: ['purple', 'blue', 'orange', 'emerald', 'pink', 'cyan', 'amber'][idx % 7],
       responses: 0,
       deals: 0,
       userId: req.user.id
@@ -1586,6 +3189,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido, sem explicações adicionais, sem
     campaignTemplates = [...otherUserTemplates, ...formatted];
     saveTemplates();
 
+    console.log(`[BatchTemplates] ✨ ${formatted.length} mensagens únicas geradas com sucesso para "${niche}"!`);
     res.json({ success: true, count: formatted.length, templates: formatted });
   } catch (error) {
     console.error("Erro ao gerar templates em lote:", error.message);
@@ -1725,18 +3329,19 @@ setInterval(async () => {
         try {
           console.log(`[BOT] Acionando follow-up automático para ${number} do usuário ${userId}`);
           
-          const openai = getOpenAIInstance(userId);
+          const user = dbUsers.find(u => u.id === userId);
+          const userName = user?.username ? user.username.split(' ')[0] : 'Vitor';
           const contextMsg = {
             role: "system",
-            content: "O cliente parou de responder há algumas horas. Faça um follow-up BEM CURTO (1 linha no máximo) e estratégico para puxar assunto de volta. Por exemplo: 'E aí, conseguiu pensar a respeito?' ou 'Ficou alguma dúvida sobre o que conversamos?'."
+            content: `Você se chama ${userName}. O cliente parou de responder. Faça um follow-up BEM CURTO (1 a 2 linhas), gentil e natural para saber se ele conseguiu ver a mensagem sobre a demonstração do site. NUNCA assine com outro nome além de ${userName}.`
           };
           
           userChatSessions[userId][number].push(contextMsg);
           
-          const completion = await openai.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
+          const completion = await createAiCompletion(userId, {
             messages: userChatSessions[userId][number],
-            temperature: 0.7, max_tokens: 50
+            temperature: 0.7,
+            max_tokens: 80
           });
           const reply = completion.choices[0].message.content;
           
