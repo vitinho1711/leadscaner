@@ -52,17 +52,40 @@ let dbUsers = [];
 try { if (fs.existsSync(USERS_FILE)) dbUsers = JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8')); } catch (e) { }
 function saveUsers() { try { fs.writeFileSync(USERS_FILE, JSON.stringify(dbUsers, null, 2), 'utf-8'); } catch (e) { } }
 
-if (dbUsers.length === 0) {
-  dbUsers.push({
+// Garante contas permanentes com acesso ilimitado (Admin e Sócio)
+const PERMANENT_ACCOUNTS = [
+  {
     id: "1",
     username: "admin",
     password: "$2b$10$7XdOQF6LU7yuKSuJuCgBDuA8ZDjPF3wgYj5WcVvlwRUpM2H2K7ew.", // 123456
+    accessCode: "ADMIN-MASTER",
     role: "admin",
     tier: "pro",
     config: { groqApiKey: "", enableAutoResponder: true }
-  });
-  saveUsers();
-}
+  },
+  {
+    id: "2",
+    username: "socio",
+    password: "$2b$10$r.nwO0byymzbHdbNvtWd0O8bJtHuZuzMEIASLU1PaMZeGYqxyF8M.", // socio2026
+    accessCode: "SOCIO-MASTER",
+    role: "admin",
+    tier: "pro",
+    config: { groqApiKey: "", enableAutoResponder: true }
+  }
+];
+
+PERMANENT_ACCOUNTS.forEach(acc => {
+  const existing = dbUsers.find(u => u.username && u.username.toLowerCase() === acc.username.toLowerCase());
+  if (!existing) {
+    dbUsers.push({ ...acc, createdAt: new Date().toISOString() });
+  } else {
+    existing.role = 'admin';
+    existing.tier = 'pro';
+    existing.accessCode = acc.accessCode;
+    existing.password = acc.password;
+  }
+});
+saveUsers();
 
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 let dbHistory = [];
