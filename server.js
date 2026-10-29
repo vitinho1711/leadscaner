@@ -936,6 +936,10 @@ function initUserWhatsApp(userId) {
         '--js-flags=--max-old-space-size=256'
       ] 
     },
+    webVersion: '2.3000.1052198210-alpha',
+    webVersionCache: fs.existsSync(path.join(DATA_DIR, '.wwebjs_cache', '2.3000.1052198210-alpha.html'))
+      ? { type: 'local', path: path.join(DATA_DIR, '.wwebjs_cache') }
+      : { type: 'remote', remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html' },
     authTimeoutMs: 60000,
     qrMaxRetries: 10
   });
@@ -1145,7 +1149,11 @@ async function autoReconnect(userId) {
   userReconnectAttempts[userId]++;
   if (userReconnectAttempts[userId] > 5) { userReconnectAttempts[userId] = 0; return; }
   try { 
-    if (whatsappClients[userId]) await whatsappClients[userId].initialize(); 
+    if (whatsappClients[userId]) {
+      await whatsappClients[userId].initialize();
+    } else {
+      initUserWhatsApp(userId);
+    }
     userReconnectAttempts[userId] = 0; 
   }
   catch (err) { setTimeout(() => autoReconnect(userId), Math.min(userReconnectAttempts[userId] * 10, 60) * 1000); }
@@ -2931,7 +2939,7 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
   let browser = null;
   let collectedLeads = [];
   const seenNames = new Set();
-  const isRender = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID || process.env.NODE_ENV === 'production';
+  const isRender = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID;
 
   if (isRender || process.env.FORCE_SMART_LEADS === 'true') {
     console.log(`[User ${userId}] ⚡ Nuvem Render detectada: Usando motor inteligente localizado ultra-leve (0% RAM, instantâneo) para ${maxLeads} leads em ${location}`);
@@ -2959,10 +2967,10 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
 
     await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(searchQuery)}?hl=pt-BR`, { 
       waitUntil: 'domcontentloaded', 
-      timeout: 22000 
+      timeout: 25000 
     });
 
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 2500));
 
     // Aceita popup de cookies se presente
     try {
@@ -2970,9 +2978,9 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
       if (btn) await btn.click();
     } catch {}
 
-    // Rola o feed dinamicamente para carregar o número exato de leads pedidos
-    const targetCards = isOnlyWithoutSite ? Math.min(maxLeads * 3, 120) : Math.min(Math.round(maxLeads * 1.4), 100);
-    const maxRounds = Math.min(18, Math.max(5, Math.ceil(targetCards / 4)));
+    // Rola o feed dinamicamente para carregar o volume de leads solicitados
+    const targetCards = isOnlyWithoutSite ? Math.min(maxLeads * 4, 150) : Math.min(Math.round(maxLeads * 2), 120);
+    const maxRounds = Math.min(25, Math.max(8, Math.ceil(targetCards / 3)));
 
     for (let round = 0; round < maxRounds; round++) {
       const currentCount = await page.evaluate(() => document.querySelectorAll('a[href*="/maps/place/"]').length);
@@ -2985,10 +2993,10 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
         }
       });
 
-      await new Promise(r => setTimeout(r, 750));
+      await new Promise(r => setTimeout(r, 850));
     }
 
-    // Extração estruturada de todos os cards
+    // Extração estruturada de todos os cards com telefones reais
     const rawItems = await page.evaluate(() => {
       const items = [];
       const seen = new Set();
@@ -3011,11 +3019,26 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
           reviews = parseInt(ratingMatch[2].replace(/\./g, '')) || 25;
         }
 
-        // Telefone
+        // Extração precisa de telefone brasileiro (celular ou fixo)
         let phone = '';
-        const phoneMatch = text.match(/\(?([1-9]{2})\)?\s?(9?\d{4})[-\s]?(\d{4})/);
-        if (phoneMatch) {
-          phone = `55${phoneMatch[1]}${phoneMatch[2]}${phoneMatch[3]}`;
+        let isMobile = false;
+        const phoneMatches = text.match(/(?:\+?55\s?)?(?:\(?([1-9]{2})\)?\s?)(?:(9\s?\d{4})|(\d{4}))[-\s]?(\d{4})/g);
+        if (phoneMatches) {
+          for (const m of phoneMatches) {
+            let digits = m.replace(/\D/g, '');
+            if (digits.startsWith('55') && digits.length >= 12) digits = digits.substring(2);
+            const ddd = parseInt(digits.substring(0, 2), 10);
+            if (ddd >= 11 && ddd <= 99) {
+              if (digits.length === 11 && digits[2] === '9') {
+                phone = `55${digits}`;
+                isMobile = true;
+                break;
+              } else if (digits.length === 10 && !phone) {
+                phone = `55${digits}`;
+                isMobile = false;
+              }
+            }
+          }
         }
 
         // Endereço
@@ -3038,6 +3061,7 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
         items.push({
           nome: name,
           whatsapp: phone || '',
+          isMobile: isMobile,
           nota,
           reviews,
           site: siteUrl,
@@ -3052,19 +3076,19 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
 
     console.log(`[User ${userId}] 📊 Cards extraídos do Maps: ${rawItems.length}`);
 
-    const ddd = detectDdd(location);
-
     for (const item of rawItems) {
       if (seenNames.has(item.nome.toLowerCase())) continue;
       if (isOnlyWithoutSite && item.hasSite) continue;
 
       seenNames.add(item.nome.toLowerCase());
-      const cleanPhone = item.whatsapp || `55${ddd}98${Math.floor(100000 + Math.random() * 899999)}`;
+      // NUNCA gera números falsos: mantém o telefone real do Maps ou marca como não informado
+      const cleanPhone = item.whatsapp || 'não informado';
 
       collectedLeads.push({
         id: Math.random().toString(36).substr(2, 9),
         nome: item.nome.slice(0, 50),
         whatsapp: cleanPhone,
+        isMobile: item.isMobile || false,
         nicho: query,
         cidade: location,
         endereco: item.endereco || `${location}, Brasil`,
@@ -3081,6 +3105,8 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
       if (collectedLeads.length >= maxLeads) break;
     }
 
+    console.log(`[User ${userId}] ✅ Total de leads reais coletados do Maps: ${collectedLeads.length}`);
+
   } catch (error) {
     console.warn(`[User ${userId}] Aviso na extração Puppeteer:`, error.message);
   } finally {
@@ -3090,14 +3116,6 @@ app.get('/api/scrape', checkTrialActive, async (req, res) => {
     }
   }
 }
-
-  // Se o Google Maps trouxe menos que o solicitado (ex: por filtro de sem site), completa com o motor inteligente
-  if (collectedLeads.length < maxLeads) {
-    const missing = maxLeads - collectedLeads.length;
-    console.log(`[User ${userId}] ⚡ Completando ${missing} leads com gerador inteligente localizado de ${location}...`);
-    const fillers = generateSmartLeads(query, location, missing, seenNames);
-    collectedLeads = collectedLeads.concat(fillers);
-  }
 
   const finalLeads = collectedLeads.slice(0, maxLeads);
   const timestamp = new Date().toISOString();
