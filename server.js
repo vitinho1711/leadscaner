@@ -819,8 +819,9 @@ async function createAiCompletion(userId, options) {
   throw lastError;
 }
 
-// WHATSAPP INIT POR USUÁRIO
-const AUTH_DIR = path.join(DATA_DIR, '.sdr_wwebjs_auth');
+// WHATSAPP INIT POR USUÁRIO - Sessões armazenadas fora do OneDrive para evitar conflitos de lock do OneDrive (EBUSY/LevelDB)
+const AUTH_DIR = process.env.AUTH_DIR || path.join(os.homedir(), '.sdr_wwebjs_auth');
+if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 function getEffectiveWaUserId(userId) {
   if (!userId) return '1';
@@ -927,13 +928,10 @@ function initUserWhatsApp(userId) {
         '--no-sandbox', 
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-extensions',
-        '--js-flags=--max-old-space-size=256'
+        '--disable-extensions'
       ] 
     },
     webVersion: '2.3000.1052198210-alpha',

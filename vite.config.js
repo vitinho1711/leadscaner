@@ -10,7 +10,14 @@ export default defineConfig({
       '/preview': 'http://localhost:3001'
     },
     watch: {
-      ignored: ['**/.wwebjs_auth/**', '**/.sdr_wwebjs_auth/**', '**/.wwebjs_cache/**', '**/leads.json', '**/history.json', '**/users.json']
+      ignored: [
+        '**/.wwebjs_auth/**',
+        '**/.sdr_wwebjs_auth/**',
+        '**/.wwebjs_cache/**',
+        '**/backups/**',
+        '**/*.json',
+        '**/*.bak'
+      ]
     }
   },
   optimizeDeps: {
